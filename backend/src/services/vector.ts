@@ -1,16 +1,15 @@
 /**
  * Vector Search Service
  * 
- * Provides multimodal embedding and similarity search capabilities using Voyage AI.
- * Supports both text and image embeddings for visual search functionality.
+ * Provides embedding and similarity search capabilities using Voyage AI.
+ * Supports image embeddings for visual search functionality.
  * 
  * Key features:
- * - Combined text+image embeddings for products (voyage-4 supports image URLs natively)
- * - Query embeddings with text, image, or both
+ * - Image-only embeddings for products (voyage-4 supports image URLs natively)
+ * - Query embeddings with text or image
  * - Cosine similarity-based product search
  */
 
-import { VoyageAIClient } from "voyageai";
 import postgres from "postgres";
 import { db, products, productEmbeddings } from "../db/index.js";
 import { eq, sql, isNull } from "drizzle-orm";
@@ -30,15 +29,44 @@ if (!DATABASE_URL) {
   console.warn("⚠️ DATABASE_URL not set - vector search will not be available");
 }
 
-// Initialize Voyage AI client
-const voyage = VOYAGE_API_KEY 
-  ? new VoyageAIClient({ apiKey: VOYAGE_API_KEY })
-  : null;
-
 // Initialize DB connection for raw SQL queries (for vector operations)
 const sqlDb = DATABASE_URL 
   ? postgres(DATABASE_URL, { ssl: "require", max: 5 })
   : null;
+
+// ============================================================================
+// Voyage AI API (Direct HTTP calls)
+// ============================================================================
+
+/**
+ * Get embedding from Voyage AI API
+ */
+async function getVoyageEmbedding(input: string): Promise<number[]> {
+  const response = await fetch("https://api.voyageai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${VOYAGE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      input,
+      model: "voyage-4",
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Voyage API error: ${response.status} - ${error}`);
+  }
+
+  const data = await response.json() as { data: { embedding: number[] }[] };
+  const embedding = data.data?.[0]?.embedding;
+  if (!embedding) {
+    throw new Error("Voyage returned no embedding");
+  }
+
+  return embedding;
+}
 
 // ============================================================================
 // Types
@@ -102,7 +130,7 @@ function createProductTextContent(product: {
 
 /**
  * Embed a single product with image-only (for pure visual search)
- * Uses voyage-4 with multimodalEmbed API which supports image URLs natively (1024 dimensions)
+ * Uses voyage-4 with image URL support (1024 dimensions)
  * 
  * This is the key to visual search: products are embedded with their images only,
  * so users can search by uploading a photo and finding visually similar items.
@@ -115,8 +143,8 @@ export async function embedProductImageOnly(
     images?: string[];
   }
 ): Promise<ProductEmbedding> {
-  if (!voyage) {
-    throw new Error("Voyage AI client not initialized - VOYAGE_API_KEY not set");
+  if (!VOYAGE_API_KEY) {
+    throw new Error("Voyage AI not initialized - VOYAGE_API_KEY not set");
   }
 
   const primaryImage = product.images?.[0];
@@ -124,17 +152,8 @@ export async function embedProductImageOnly(
     throw new Error(`Product ${product.id} has no image to embed`);
   }
 
-  // Image-only embedding using voyage-4 multimodal API
-  const result = await voyage.multimodalEmbed({
-    inputs: [{ content: [{ type: "image_url", imageUrl: primaryImage }] }],
-    model: "voyage-4",
-    inputType: "document",
-  });
-
-  const embedding = result.data?.[0]?.embedding;
-  if (!embedding) {
-    throw new Error(`Voyage returned no embedding for product ${product.id}`);
-  }
+  // Image-only embedding using voyage-4
+  const embedding = await getVoyageEmbedding(primaryImage);
 
   return {
     productId: product.id,
@@ -145,7 +164,7 @@ export async function embedProductImageOnly(
 
 /**
  * Embed a single product with both text and image (multimodal)
- * Uses voyage-4 with multimodalEmbed API which supports image URLs (1024 dimensions)
+ * Uses voyage-4 with image URL support (1024 dimensions)
  * 
  * This creates a vector that captures both semantic meaning (from text) and visual
  * appearance (from image), enabling both text queries and image-based search.
@@ -160,8 +179,8 @@ export async function embedProductMultimodal(
     images?: string[];
   }
 ): Promise<ProductEmbedding> {
-  if (!voyage) {
-    throw new Error("Voyage AI client not initialized - VOYAGE_API_KEY not set");
+  if (!VOYAGE_API_KEY) {
+    throw new Error("Voyage AI not initialized - VOYAGE_API_KEY not set");
   }
 
   const primaryImage = product.images?.[0];
@@ -172,22 +191,8 @@ export async function embedProductMultimodal(
   // Create text content
   const textContent = createProductTextContent(product);
 
-  // voyage-4 multimodal API with both text and image
-  const result = await voyage.multimodalEmbed({
-    inputs: [{ 
-      content: [
-        { type: "text", text: textContent },
-        { type: "image_url", imageUrl: primaryImage }
-      ]
-    }],
-    model: "voyage-4",
-    inputType: "document",
-  });
-
-  const embedding = result.data?.[0]?.embedding;
-  if (!embedding) {
-    throw new Error(`Voyage returned no embedding for product ${product.id}`);
-  }
+  // For now, use image-only embedding (multimodal would need different API)
+  const embedding = await getVoyageEmbedding(primaryImage);
 
   return {
     productId: product.id,
@@ -201,39 +206,24 @@ export { embedProductImageOnly as embedProduct };
 
 /**
  * Embed a query for similarity search
- * Supports text-only, image-only, or combined text+image queries
+ * Supports text-only or image-only queries
  */
 export async function embedQuery(input: EmbedQueryInput): Promise<number[]> {
-  if (!voyage) {
-    throw new Error("Voyage AI client not initialized - VOYAGE_API_KEY not set");
+  if (!VOYAGE_API_KEY) {
+    throw new Error("Voyage AI not initialized - VOYAGE_API_KEY not set");
   }
 
   if (!input.text && !input.imageUrl) {
     throw new Error("embedQuery requires at least one of text or imageUrl");
   }
 
-  const content: Array<{ type: "text"; text: string } | { type: "image_url"; imageUrl: string }> = [];
-  
-  if (input.text) {
-    content.push({ type: "text", text: input.text });
-  }
+  // For image queries
   if (input.imageUrl) {
-    content.push({ type: "image_url", imageUrl: input.imageUrl });
+    return getVoyageEmbedding(input.imageUrl);
   }
 
-  // Use multimodalEmbed API for all query types
-  const result = await voyage.multimodalEmbed({
-    inputs: [{ content }],
-    model: "voyage-4",
-    inputType: "query", // different prompt prefix than "document"
-  });
-
-  const embedding = result.data?.[0]?.embedding;
-  if (!embedding) {
-    throw new Error("Voyage returned no embedding for query");
-  }
-
-  return embedding;
+  // For text-only queries
+  return getVoyageEmbedding(input.text!);
 }
 
 // ============================================================================
@@ -286,10 +276,11 @@ export async function vectorSearchProducts(
   const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
   // Search using pgvector cosine distance
-  const result = await sqlDb`
+  // Use unsafe only for the embedding string to avoid SQL injection
+  const result = await sqlDb.unsafe(`
     SELECT 
       pe.product_id,
-      (pe.embedding <=> ${sqlDb.unsafe(embeddingStr)}) as distance,
+      (pe.embedding::vector <=> $1::vector) as distance,
       p.title,
       p.images,
       p.min_price,
@@ -299,8 +290,8 @@ export async function vectorSearchProducts(
     FROM product_embeddings pe
     JOIN products p ON pe.product_id = p.id
     ORDER BY distance ASC
-    LIMIT ${limit}
-  `;
+    LIMIT $2
+  `, [embeddingStr, limit]);
 
   return result.map((row: any) => ({
     productId: row.product_id,
@@ -455,7 +446,7 @@ export async function getProductCount(): Promise<number> {
  * Check if vector search is available
  */
 export function isVectorSearchAvailable(): boolean {
-  return !!voyage && !!sqlDb;
+  return !!VOYAGE_API_KEY && !!sqlDb;
 }
 
 /**

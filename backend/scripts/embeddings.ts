@@ -1,6 +1,5 @@
 import "dotenv/config";
 import postgres from "postgres";
-import { VoyageAIClient } from "voyageai";
 
 // ============================================================================
 // Configuration
@@ -23,11 +22,9 @@ if (!DATABASE_URL) {
 // Voyage AI API (Image-Only for Visual Search)
 // ============================================================================
 
-const voyage = new VoyageAIClient({ apiKey: VOYAGE_API_KEY });
-
 /**
  * Get IMAGE-ONLY embedding for visual search
- * Uses voyage-4 multimodal API with image URLs (1024 dimensions)
+ * Uses voyage-4 with image URLs (1024 dimensions)
  * 
  * This is the key to visual search: products are embedded with their images only,
  * so users can upload a photo and find visually similar items.
@@ -35,14 +32,25 @@ const voyage = new VoyageAIClient({ apiKey: VOYAGE_API_KEY });
  * Pure image embedding ensures visual similarity matching works correctly.
  */
 async function getImageEmbedding(imageUrl: string): Promise<number[]> {
-  // Use the voyageai SDK's multimodalEmbed API
-  const result = await voyage.multimodalEmbed({
-    inputs: [{ content: [{ type: "image_url", imageUrl }] }],
-    model: "voyage-4",
-    inputType: "document",
+  const response = await fetch("https://api.voyageai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${VOYAGE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      input: imageUrl,
+      model: "voyage-4",
+    }),
   });
 
-  const embedding = result.data?.[0]?.embedding;
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Voyage API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json() as { data: { embedding: number[] }[] };
+  const embedding = data.data?.[0]?.embedding;
   if (!embedding) {
     throw new Error("Voyage returned no embedding");
   }
@@ -96,11 +104,27 @@ async function main() {
   console.log("🚀 Starting IMAGE-ONLY embeddings generation...");
   console.log("   Using voyage-4 with image URLs for visual search support\n");
 
+  // Limit to 100 products for initial testing
+  const TEST_LIMIT = 100;
   const products = await getAllProducts();
-  console.log(`Found ${products.length} products to embed`);
+  
+  // Check which products are already embedded
+  const existingEmbeddings = await db`
+    SELECT product_id FROM product_embeddings
+  `;
+  const existingIds = new Set(existingEmbeddings.map(e => e.product_id));
+  
+  // Filter out already embedded products and limit to TEST_LIMIT
+  const toEmbed = products
+    .filter(p => !existingIds.has(p.id))
+    .slice(0, TEST_LIMIT);
+  
+  console.log(`Total products in DB: ${products.length}`);
+  console.log(`Already embedded: ${existingIds.size}`);
+  console.log(`Will embed: ${toEmbed.length} products\n`);
 
   // Count how many have images
-  const withImages = products.filter(p => p.images && p.images.length > 0);
+  const withImages = toEmbed.filter(p => p.images && p.images.length > 0);
   console.log(`   ${withImages.length} products have images (required for embedding)\n`);
 
   let processed = 0;
@@ -108,8 +132,8 @@ async function main() {
   let errors = 0;
   const BATCH_SIZE = 1; // One at a time due to rate limits
 
-  for (let i = 0; i < products.length; i += BATCH_SIZE) {
-    const batch = products.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < toEmbed.length; i += BATCH_SIZE) {
+    const batch = toEmbed.slice(i, i + BATCH_SIZE);
 
     for (let j = 0; j < batch.length; j++) {
       const p = batch[j];
@@ -117,8 +141,8 @@ async function main() {
       // Skip products without images - visual search requires images
       if (!p.images || p.images.length === 0) {
         skipped++;
-        if ((i + j + 1) % 100 === 0 || i + j + 1 >= products.length) {
-          console.log(`   Progress: ${i + j + 1}/${products.length} (skipped: ${skipped}, errors: ${errors})`);
+        if ((i + j + 1) % 20 === 0 || i + j + 1 >= toEmbed.length) {
+          console.log(`   Progress: ${i + j + 1}/${toEmbed.length} (embedded: ${processed}, skipped: ${skipped}, errors: ${errors})`);
         }
         continue;
       }
@@ -135,8 +159,8 @@ async function main() {
           await insertEmbedding({ product_id: p.id, embedding: JSON.stringify(embedding) });
           processed++;
           
-          if ((i + j + 1) % 50 === 0 || i + j + 1 >= products.length) {
-            console.log(`   Progress: ${i + j + 1}/${products.length} (embedded: ${processed}, skipped: ${skipped}, errors: ${errors})`);
+          if ((i + j + 1) % 20 === 0 || i + j + 1 >= toEmbed.length) {
+            console.log(`   Progress: ${i + j + 1}/${toEmbed.length} (embedded: ${processed}, skipped: ${skipped}, errors: ${errors})`);
           }
           
           // Rate limiting - 200ms between requests
