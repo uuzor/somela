@@ -8,8 +8,12 @@ import {
   bucketConfidence,
   type SearchResultWithConfidence
 } from "../services/vector.js";
+import { visualSearchRateLimit } from "../middleware/rateLimit.js";
 
 export const visualSearchRouter = Router();
+
+// Apply rate limiting to POST endpoints
+visualSearchRouter.post("/", visualSearchRateLimit);
 
 // POST /api/visual-search - Upload image for visual search
 visualSearchRouter.post("/", async (req, res) => {

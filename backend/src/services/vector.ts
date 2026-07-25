@@ -90,6 +90,7 @@ export interface SearchResult extends SimilarProduct {
   maxPrice: number | null;
   category: string | null;
   url: string | null;
+  confidence?: "exact" | "close" | "similar" | "low";
 }
 
 export interface EmbedQueryInput {
@@ -229,35 +230,6 @@ export async function embedQuery(input: EmbedQueryInput): Promise<number[]> {
 // ============================================================================
 // Vector Search Functions
 // ============================================================================
-
-/**
- * Find products similar to a given product using stored embeddings
- * Uses the product's own embedding as the query vector
- */
-export async function findSimilarToProduct(
-  productId: string,
-  limit = 12
-): Promise<SimilarProduct[]> {
-  if (!sqlDb) {
-    throw new Error("Database not initialized - DATABASE_URL not set");
-  }
-
-  // Find similar products using vector cosine distance
-  // Using raw SQL for pgvector operations
-  const result = await sqlDb`
-    SELECT b.product_id, (a.embedding <=> b.embedding) as distance
-    FROM product_embeddings a, product_embeddings b
-    WHERE a.product_id = ${productId}
-      AND b.product_id != ${productId}
-    ORDER BY distance ASC
-    LIMIT ${limit}
-  `;
-
-  return (result as any[]).map((row) => ({
-    productId: row.product_id,
-    distance: Number(row.distance),
-  }));
-}
 
 /**
  * Search for products similar to a query (text, image, or both)
@@ -436,6 +408,60 @@ export async function getProductCount(): Promise<number> {
     .from(products);
   
   return result[0]?.count ?? 0;
+}
+
+/**
+ * Find products similar to a given product
+ * Uses the product's existing embedding for similarity search
+ */
+export async function findSimilarToProduct(
+  productId: string,
+  limit = 12
+): Promise<SearchResultWithConfidence[]> {
+  if (!sqlDb) {
+    throw new Error("Database not initialized - DATABASE_URL not set");
+  }
+
+  // Get the product's embedding
+  const [embedding] = await sqlDb`
+    SELECT pe.embedding
+    FROM product_embeddings pe
+    WHERE pe.product_id = ${productId}
+  `;
+
+  if (!embedding) {
+    throw new Error(`No embedding found for product ${productId}`);
+  }
+
+  // Search for similar products using cosine distance
+  const result = await sqlDb.unsafe(`
+    SELECT 
+      pe.product_id,
+      (pe.embedding::vector <=> $1::vector) as distance,
+      p.title,
+      p.images,
+      p.min_price,
+      p.max_price,
+      p.category,
+      p.url
+    FROM product_embeddings pe
+    JOIN products p ON pe.product_id = p.id
+    WHERE pe.product_id != $2
+    ORDER BY distance ASC
+    LIMIT $3
+  `, [embedding.embedding, productId, limit]);
+
+  return result.map((row: any) => ({
+    productId: row.product_id,
+    distance: Number(row.distance),
+    title: row.title || "",
+    images: row.images || [],
+    minPrice: row.min_price ? parseFloat(String(row.min_price)) : null,
+    maxPrice: row.max_price ? parseFloat(String(row.max_price)) : null,
+    category: row.category,
+    url: row.url,
+    confidence: bucketConfidence(Number(row.distance)),
+  }));
 }
 
 // ============================================================================

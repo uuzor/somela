@@ -1,9 +1,13 @@
 import { Router } from "express";
 import { db, products } from "../db/index.js";
-import { eq, and, gte, lte, like, sql, desc } from "drizzle-orm";
+import { eq, and, gte, lte, like, sql, desc, count } from "drizzle-orm";
 import { CatalogFiltersSchema } from "../types/api.js";
+import { defaultRateLimit } from "../middleware/rateLimit.js";
 
 export const catalogRouter = Router();
+
+// Apply rate limiting to all catalog routes
+catalogRouter.use(defaultRateLimit);
 
 // Color fallback words (same as original catalog-query.ts)
 const COLOR_WORDS = [
@@ -14,16 +18,25 @@ const COLOR_WORDS = [
 // GET /api/catalog
 catalogRouter.get("/", async (req, res) => {
   try {
-    // Convert query params to proper types (Express sends strings)
+    // Validate and parse query params with limits
+    const limit = Math.min(
+      parseInt(req.query.limit as string, 10) || 20,
+      100  // Max 100 items per request
+    );
+    const offset = Math.max(
+      parseInt(req.query.offset as string, 10) || 0,
+      0
+    );
+
     const rawFilters = {
-      category: req.query.category,
-      color: req.query.color,
+      category: req.query.category as string | undefined,
+      color: req.query.color as string | undefined,
       minPrice: req.query.minPrice ? parseFloat(req.query.minPrice as string) : undefined,
       maxPrice: req.query.maxPrice ? parseFloat(req.query.maxPrice as string) : undefined,
-      shopId: req.query.shopId,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
-      offset: req.query.offset ? parseInt(req.query.offset as string, 10) : 0,
+      shopId: req.query.shopId as string | undefined,
     };
+
+    // Validate filters
     const filters = CatalogFiltersSchema.parse(rawFilters);
     
     // Build conditions array
@@ -45,15 +58,21 @@ catalogRouter.get("/", async (req, res) => {
       conditions.push(gte(products.maxPrice, String(filters.maxPrice)));
     }
     
-    // Execute query with or without conditions
+    // Get total count before pagination
+    const countResult = conditions.length > 0
+      ? await db.select({ count: count() }).from(products).where(and(...conditions))
+      : await db.select({ count: count() }).from(products);
+    const total = countResult[0]?.count ?? 0;
+    
+    // Execute query with pagination
     const results = conditions.length > 0
       ? await db.select().from(products).where(and(...conditions))
       : await db.select().from(products);
     
-    // Sort and paginate in memory (Drizzle doesn't support orderBy before limit with complex queries easily)
+    // Sort by fetchedAt descending
     const sorted = results
       .sort((a, b) => new Date(b.fetchedAt).getTime() - new Date(a.fetchedAt).getTime())
-      .slice(filters.offset, filters.offset + filters.limit);
+      .slice(offset, offset + limit);
     
     // Color filtering happens in JS (fallback logic)
     let filtered = sorted;
@@ -87,19 +106,23 @@ catalogRouter.get("/", async (req, res) => {
         tags: p.tags,
         url: p.url,
       })),
-      total: filtered.length,
+      pagination: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+      },
       filters: {
         category: filters.category,
         color: filters.color,
         minPrice: filters.minPrice,
         maxPrice: filters.maxPrice,
-        limit: filters.limit,
-        offset: filters.offset,
+        shopId: filters.shopId,
       },
     });
   } catch (error) {
     console.error("Catalog query error:", error);
-    res.status(400).json({ error: "Invalid filters", details: error });
+    res.status(400).json({ error: "Invalid filters", details: String(error) });
   }
 });
 

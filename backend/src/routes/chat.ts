@@ -2,8 +2,12 @@ import { Router } from "express";
 import { db, conversations, products } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import { ChatRequestSchema } from "../types/api.js";
+import { strictRateLimit } from "../middleware/rateLimit.js";
 
 export const chatRouter = Router();
+
+// Apply strict rate limiting (chat is expensive)
+chatRouter.post("/", strictRateLimit);
 
 // Placeholder for AI-powered chat discovery - requires ANTHROPIC_API_KEY
 // Full implementation in Phase 3

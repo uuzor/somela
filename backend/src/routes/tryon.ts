@@ -2,11 +2,13 @@ import { Router } from "express";
 import { db, tryonTasks, userSelfies, sessions } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import { TryonRequestSchema } from "../types/api.js";
+import { tryonRateLimit } from "../middleware/rateLimit.js";
 
 export const tryonRouter = Router();
 
-// Placeholder for YouCam try-on - requires YOUCAM_API_KEY
-// Full implementation in Phase 3
+// Apply rate limiting
+tryonRouter.post("/", tryonRateLimit);
+tryonRouter.post("/selfie", tryonRateLimit);
 
 // POST /api/tryon - Initiate try-on
 tryonRouter.post("/", async (req, res) => {
