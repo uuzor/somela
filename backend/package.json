@@ -10,7 +10,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "ingest": "tsx src/services/ingest.ts"
+    "ingest": "tsx src/services/ingest.ts",
+    "image-prep": "tsx scripts/image-prep.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
