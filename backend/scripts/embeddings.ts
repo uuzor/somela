@@ -1,5 +1,6 @@
 import "dotenv/config";
 import postgres from "postgres";
+import { VoyageAIClient } from "voyageai";
 
 // ============================================================================
 // Configuration
@@ -19,28 +20,34 @@ if (!DATABASE_URL) {
 }
 
 // ============================================================================
-// Voyage AI API
+// Voyage AI API (Image-Only for Visual Search)
 // ============================================================================
 
-async function getEmbedding(text: string): Promise<number[]> {
-  const response = await fetch("https://api.voyageai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${VOYAGE_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      input: text,
-      model: "voyage-4",  // Supports both text AND image URLs (1024 dims)
-    }),
+const voyage = new VoyageAIClient({ apiKey: VOYAGE_API_KEY });
+
+/**
+ * Get IMAGE-ONLY embedding for visual search
+ * Uses voyage-4 multimodal API with image URLs (1024 dimensions)
+ * 
+ * This is the key to visual search: products are embedded with their images only,
+ * so users can upload a photo and find visually similar items.
+ * 
+ * Pure image embedding ensures visual similarity matching works correctly.
+ */
+async function getImageEmbedding(imageUrl: string): Promise<number[]> {
+  // Use the voyageai SDK's multimodalEmbed API
+  const result = await voyage.multimodalEmbed({
+    inputs: [{ content: [{ type: "image_url", imageUrl }] }],
+    model: "voyage-4",
+    inputType: "document",
   });
 
-  if (!response.ok) {
-    throw new Error(`Voyage API error: ${response.status}`);
+  const embedding = result.data?.[0]?.embedding;
+  if (!embedding) {
+    throw new Error("Voyage returned no embedding");
   }
 
-  const data = await response.json() as { data: { embedding: number[] }[] };
-  return data.data[0].embedding;
+  return embedding;
 }
 
 // ============================================================================
@@ -55,6 +62,7 @@ interface Product {
   description: string | null;
   category: string | null;
   tags: string[];
+  images: string[];
 }
 
 interface ProductEmbedding {
@@ -64,7 +72,7 @@ interface ProductEmbedding {
 
 async function getProductsWithoutEmbeddings(): Promise<Product[]> {
   return db`
-    SELECT p.id, p.title, p.description, p.category, p.tags
+    SELECT p.id, p.title, p.description, p.category, p.tags, p.images
     FROM products p
     LEFT JOIN product_embeddings pe ON p.id = pe.product_id
     WHERE pe.product_id IS NULL
@@ -73,39 +81,11 @@ async function getProductsWithoutEmbeddings(): Promise<Product[]> {
 }
 
 async function getAllProducts(): Promise<Product[]> {
-  return db`SELECT id, title, description, category, tags FROM products`;
+  return db`SELECT id, title, description, category, tags, images FROM products`;
 }
 
 async function insertEmbedding(embedding: ProductEmbedding) {
   await db`INSERT INTO product_embeddings ${db(embedding)} ON CONFLICT (product_id) DO UPDATE SET embedding = ${embedding.embedding}`;
-}
-
-async function insertEmbeddings(embeddings: ProductEmbedding[]) {
-  for (const embedding of embeddings) {
-    await insertEmbedding(embedding);
-  }
-}
-
-// ============================================================================
-// Text creation for embedding
-// ============================================================================
-
-function createEmbeddingText(product: Product): string {
-  const parts: string[] = [product.title];
-  
-  if (product.category) {
-    parts.push(`Category: ${product.category}`);
-  }
-  
-  if (product.description) {
-    parts.push(product.description);
-  }
-  
-  if (product.tags && product.tags.length > 0) {
-    parts.push(`Tags: ${product.tags.join(", ")}`);
-  }
-  
-  return parts.join(". ");
 }
 
 // ============================================================================
@@ -113,12 +93,18 @@ function createEmbeddingText(product: Product): string {
 // ============================================================================
 
 async function main() {
-  console.log("🚀 Starting embeddings generation...\n");
+  console.log("🚀 Starting IMAGE-ONLY embeddings generation...");
+  console.log("   Using voyage-4 with image URLs for visual search support\n");
 
   const products = await getAllProducts();
   console.log(`Found ${products.length} products to embed`);
 
+  // Count how many have images
+  const withImages = products.filter(p => p.images && p.images.length > 0);
+  console.log(`   ${withImages.length} products have images (required for embedding)\n`);
+
   let processed = 0;
+  let skipped = 0;
   let errors = 0;
   const BATCH_SIZE = 1; // One at a time due to rate limits
 
@@ -127,22 +113,33 @@ async function main() {
 
     for (let j = 0; j < batch.length; j++) {
       const p = batch[j];
-      const text = createEmbeddingText(p);
+      
+      // Skip products without images - visual search requires images
+      if (!p.images || p.images.length === 0) {
+        skipped++;
+        if ((i + j + 1) % 100 === 0 || i + j + 1 >= products.length) {
+          console.log(`   Progress: ${i + j + 1}/${products.length} (skipped: ${skipped}, errors: ${errors})`);
+        }
+        continue;
+      }
+      
+      const primaryImage = p.images[0];
       
       let retries = 0;
       const maxRetries = 3;
       
       while (retries < maxRetries) {
         try {
-          const embedding = await getEmbedding(text);
+          // Get IMAGE-ONLY embedding (pure visual similarity)
+          const embedding = await getImageEmbedding(primaryImage);
           await insertEmbedding({ product_id: p.id, embedding: JSON.stringify(embedding) });
           processed++;
           
           if ((i + j + 1) % 50 === 0 || i + j + 1 >= products.length) {
-            console.log(`   Processed ${i + j + 1}/${products.length}`);
+            console.log(`   Progress: ${i + j + 1}/${products.length} (embedded: ${processed}, skipped: ${skipped}, errors: ${errors})`);
           }
           
-          // Minimal delay between requests (200ms)
+          // Rate limiting - 200ms between requests
           await new Promise((r) => setTimeout(r, 200));
           break;
         } catch (err) {
@@ -160,7 +157,10 @@ async function main() {
     }
   }
 
-  console.log(`\n✅ Embeddings complete! Processed: ${processed}, Errors: ${errors}`);
+  console.log(`\n✅ Embeddings complete!`);
+  console.log(`   Processed: ${processed}`);
+  console.log(`   Skipped (no images): ${skipped}`);
+  console.log(`   Errors: ${errors}`);
   
   await db.end();
 }
