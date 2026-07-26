@@ -2,8 +2,12 @@ import { Router } from "express";
 import { db, sessions, users } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
+import { defaultRateLimit } from "../middleware/rateLimit.js";
 
 export const sessionsRouter = Router();
+
+// Apply rate limiting
+sessionsRouter.use(defaultRateLimit);
 
 // POST /api/sessions - Create a new session (guest or authenticated)
 sessionsRouter.post("/", async (req, res) => {

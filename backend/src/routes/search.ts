@@ -2,17 +2,23 @@ import { Router } from "express";
 import { db, products, productEmbeddings } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import { SemanticSearchSchema } from "../types/api.js";
+import { searchRateLimit } from "../middleware/rateLimit.js";
+import { 
+  vectorSearchProducts, 
+  findSimilarToProduct,
+  isVectorSearchAvailable 
+} from "../services/vector.js";
 
 export const searchRouter = Router();
 
-// Placeholder for semantic search - requires VOYAGE_API_KEY and embeddings
-// Full implementation in Phase 2
+// Apply rate limiting
+searchRouter.use(searchRateLimit);
 
 // GET /api/search/similar/:productId - "More like this" button
 searchRouter.get("/similar/:productId", async (req, res) => {
   try {
     const { productId } = req.params;
-    const { limit = 12 } = req.query;
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 12, 24);
     
     // Check if product exists
     const [product] = await db
@@ -25,20 +31,14 @@ searchRouter.get("/similar/:productId", async (req, res) => {
       return res.status(404).json({ error: "Product not found" });
     }
     
-    // Check if embeddings exist
-    const [embedding] = await db
-      .select()
-      .from(productEmbeddings)
-      .where(eq(productEmbeddings.productId, productId))
-      .limit(1);
-    
-    if (!embedding) {
-      // Fallback: return random products (no embeddings yet)
+    // Check if vector search is available
+    if (!isVectorSearchAvailable()) {
+      // Fallback: return products from same category
       const fallback = await db
         .select()
         .from(products)
         .where(eq(products.shopId, product.shopId))
-        .limit(Number(limit));
+        .limit(limit);
       
       return res.json({
         products: fallback.map((p) => ({
@@ -46,18 +46,31 @@ searchRouter.get("/similar/:productId", async (req, res) => {
           title: p.title,
           images: p.images,
           minPrice: p.minPrice ? parseFloat(String(p.minPrice)) : null,
+          maxPrice: p.maxPrice ? parseFloat(String(p.maxPrice)) : null,
           category: p.category,
           url: p.url,
         })),
-        note: "Vector embeddings not ready - using fallback",
+        mode: "fallback",
+        message: "Vector search not available",
       });
     }
     
-    // TODO: Implement pgvector KNN search
-    // For now, return placeholder
+    // Use vector search for similar products
+    const similarProducts = await findSimilarToProduct(productId, limit);
+    
     res.json({
-      message: "Semantic search coming in Phase 2",
-      requires: ["VOYAGE_API_KEY", "product_embeddings populated"],
+      products: similarProducts.map((p) => ({
+        id: p.productId,
+        title: p.title,
+        images: p.images,
+        minPrice: p.minPrice,
+        maxPrice: p.maxPrice,
+        category: p.category,
+        url: p.url,
+        distance: p.distance,
+        confidence: p.confidence,
+      })),
+      mode: "vector",
     });
   } catch (error) {
     console.error("Similar products error:", error);
@@ -69,6 +82,7 @@ searchRouter.get("/similar/:productId", async (req, res) => {
 searchRouter.post("/semantic", async (req, res) => {
   try {
     const input = SemanticSearchSchema.parse(req.body);
+    const limit = Math.min(input.limit || 12, 24);
     
     if (!process.env.VOYAGE_API_KEY) {
       return res.status(503).json({
@@ -77,14 +91,36 @@ searchRouter.post("/semantic", async (req, res) => {
       });
     }
     
-    // TODO: Implement semantic search with Voyage AI
-    // For now, return placeholder
+    if (!isVectorSearchAvailable()) {
+      return res.status(503).json({
+        error: "Semantic search not available",
+        reason: "Database not connected",
+      });
+    }
+    
+    // Perform vector search
+    const results = await vectorSearchProducts(
+      { text: input.text },
+      limit
+    );
+    
     res.json({
-      message: "Semantic search coming in Phase 2",
-      query: input,
+      products: results.map((p) => ({
+        id: p.productId,
+        title: p.title,
+        images: p.images,
+        minPrice: p.minPrice,
+        maxPrice: p.maxPrice,
+        category: p.category,
+        url: p.url,
+        distance: p.distance,
+        confidence: p.confidence,
+      })),
+      query: input.text,
+      mode: "semantic",
     });
   } catch (error) {
     console.error("Semantic search error:", error);
-    res.status(400).json({ error: "Invalid search query", details: error });
+    res.status(500).json({ error: "Search failed", details: String(error) });
   }
 });

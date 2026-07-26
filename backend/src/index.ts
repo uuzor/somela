@@ -14,7 +14,15 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: "10mb" })); // For image uploads
+
+// Raw body for webhook signature verification (before JSON parsing)
+app.use("/api/tryon/webhook", express.raw({ type: "application/json", limit: "10mb" }), (req, _res, next) => {
+  (req as any).rawBody = (req as any).body?.toString() || "";
+  next();
+});
+
+// JSON parsing for all other routes
+app.use(express.json({ limit: "10mb" }));
 
 // Health check
 app.get("/health", (_req, res) => {

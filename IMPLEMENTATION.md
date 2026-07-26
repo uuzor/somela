@@ -180,22 +180,23 @@
 ### 3.3 YouCam Try-on Integration
 
 **Tasks:**
-- [ ] Create `POST /tryon` endpoint:
+- [x] Create `POST /tryon` endpoint:
   ```
   POST /tryon { userId, garmentId }
   ```
-- [ ] Create `youcam-client.ts`:
+- [x] Create `youcam-client.ts`:
   - Upload garment image + user selfie
   - Initiate AI-Cloth task
   - Store taskId → userId mapping
   - Return `{ status: "processing", taskId }`
-- [ ] Create webhook receiver:
+- [x] Create webhook receiver:
   - Verify HMAC signature
   - Look up userId for taskId
   - Store result image URL
-- [ ] Create `GET /tryon/:taskId` endpoint:
+- [x] Create `GET /tryon/:taskId` endpoint:
   - Return status + result image URL when ready
 - [ ] UI: loading state → result display on card
+- [x] Create batch image prep script for background removal + enhancement
 
 ### 3.4 Agent Try-on Tool
 

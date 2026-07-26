@@ -33,6 +33,34 @@ export const shops = pgTable("shops", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// Product variants table
+export const productVariants = pgTable("product_variants", {
+  id: text("id").primaryKey(), // "{productId}:{variantId}"
+  productId: text("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  shopVariantId: varchar("shop_variant_id", { length: 100 }),
+  
+  // Variant attributes
+  title: varchar("title", { length: 255 }),
+  color: varchar("color", { length: 50 }),
+  size: varchar("size", { length: 20 }),
+  
+  // Pricing
+  price: numeric("price", { precision: 10, scale: 2 }),
+  
+  // Stock
+  stockQuantity: serial("stock_quantity"),
+  available: boolean("available").default(true),
+  
+  // Image
+  image: text("image"),
+  
+  // Timestamps
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  productIdIdx: index("product_variants_product_idx").on(table.productId),
+}));
+
 export const products = pgTable("products", {
   id: text("id").primaryKey(), // "{shopId}:{shopifyProductId}"
   shopId: varchar("shop_id", { length: 100 }).notNull(),
@@ -119,17 +147,18 @@ export const users = pgTable("users", {
 export const userPreferences = pgTable("user_preferences", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "cascade" }),
+  sessionId: text("session_id"), // Made optional for flexibility
   
   // Preference fields
   category: varchar("category", { length: 100 }),
-  color: varchar("color", { length: 50 }),
+  preferredColors: jsonb("preferred_colors").$type<string[]>().default([]),
+  preferredStyles: jsonb("preferred_styles").$type<string[]>().default([]),
   maxPrice: numeric("max_price", { precision: 10, scale: 2 }),
   minPrice: numeric("min_price", { precision: 10, scale: 2 }),
   
   // Additional preferences
-  style: jsonb("style").$type<string[]>().default([]), // boho, minimalist, etc.
-  size: varchar("size", { length: 20 }),
+  sizes: jsonb("sizes").$type<string[]>().default([]), // ["S", "M", "L"]
+  dislikedItems: jsonb("disliked_items").$type<string[]>().default([]),
   
   // Timestamps
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -160,14 +189,17 @@ export const userSelfies = pgTable("user_selfies", {
 
 export const tryonTasks = pgTable("tryon_tasks", {
   id: uuid("id").primaryKey().defaultRandom(),
-  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  sessionId: uuid("session_id").references(() => sessions.id),
+  userId: text("user_id").notNull(), // Made nullable for flexibility
+  sessionId: text("session_id"), // Made flexible
   
   // Products being tried on
-  productIds: jsonb("product_ids").$type<string[]>().notNull(),
+  productId: text("product_id"), // Single product for AI try-on
+  productIds: jsonb("product_ids").$type<string[]>().default([]), // Multiple products
   
-  // Selfie used
-  selfieId: uuid("selfie_id").references(() => userSelfies.id),
+  // Images
+  garmentImageUrl: text("garment_image_url"),
+  userSelfieUrl: text("user_selfie_url"),
+  selfieId: uuid("selfie_id"),
   
   // Task status
   externalTaskId: text("external_task_id"), // YouCam task ID
@@ -224,8 +256,8 @@ export const visualSearchTasks = pgTable("visual_search_tasks", {
 
 export const conversations = pgTable("conversations", {
   id: uuid("id").primaryKey().defaultRandom(),
-  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  sessionId: uuid("session_id").references(() => sessions.id),
+  userId: text("user_id").notNull(), // Made nullable for flexibility
+  sessionId: text("session_id"), // Made flexible, can be string or uuid
   
   // Messages stored as JSON for simplicity
   messages: jsonb("messages").$type<ChatMessage[]>().default([]),
@@ -238,6 +270,7 @@ export const conversations = pgTable("conversations", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   userIdIdx: index("conversations_user_id_idx").on(table.userId),
+  sessionIdIdx: index("conversations_session_idx").on(table.sessionId),
 }));
 
 // ============================================================================
@@ -269,10 +302,12 @@ export interface VisualSearchResult {
 export interface UserPreferences {
   category?: string;
   color?: string;
+  preferredColors?: string[];
+  preferredStyles?: string[];
   maxPrice?: number;
   minPrice?: number;
-  style?: string[];
-  size?: string;
+  sizes?: string[];
+  dislikedItems?: string[];
 }
 
 // ============================================================================
@@ -291,6 +326,14 @@ export const productsRelations = relations(products, ({ one, many }) => ({
   embedding: one(productEmbeddings, {
     fields: [products.id],
     references: [productEmbeddings.productId],
+  }),
+  variants: many(productVariants),
+}));
+
+export const productVariantsRelations = relations(productVariants, ({ one }) => ({
+  product: one(products, {
+    fields: [productVariants.productId],
+    references: [products.id],
   }),
 }));
 
