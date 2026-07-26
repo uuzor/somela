@@ -13,6 +13,9 @@
  */
 
 import crypto from "crypto";
+import { db } from "../db/index.js";
+import { userSelfies } from "../db/schema.js";
+import { eq } from "drizzle-orm";
 
 const YOUCAM_BASE_URL = "https://yce-api-01.makeupar.com";
 
@@ -374,10 +377,6 @@ export async function processSelfie(
   const processedUrl = await processImage(imageUrl, apiKey);
 
   if (processedUrl) {
-    const { db } = await import("../db/index.js");
-    const { userSelfies } = await import("../db/schema.js");
-    const { eq } = await import("drizzle-orm");
-
     await db
       .update(userSelfies)
       .set({

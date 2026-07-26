@@ -18,6 +18,7 @@ import {
   createBackgroundRemovalTask,
   createPhotoEnhanceTask,
   getTaskStatus,
+  extractResultUrl,
   isYouCamConfigured,
 } from "../src/services/youcam.js";
 
@@ -52,8 +53,13 @@ async function pollTask(
   for (let i = 0; i < maxAttempts; i++) {
     const status = await getTaskStatus(taskId, taskType, process.env.YOUCAM_API_KEY!);
     
-    if (status.task_status === "success" && status.result) {
-      return { result_url: (status.result as any).result_image_url };
+    if (status.task_status === "success") {
+      const resultUrl = extractResultUrl(status);
+      if (resultUrl) {
+        return { result_url: resultUrl };
+      }
+      console.error(`Task ${taskId} succeeded but no result URL found`);
+      return null;
     }
     
     if (status.task_status === "error") {
@@ -83,7 +89,7 @@ async function processImage(imageUrl: string): Promise<string | null> {
     // Background removal
     console.log(`  Creating background removal task...`);
     const bgRemovalTask = await createBackgroundRemovalTask(
-      { image_id: upload.file_id },
+      { image_url: upload.file_id },
       apiKey
     );
     console.log(`  Background removal task: ${bgRemovalTask.task_id}`);
@@ -94,14 +100,20 @@ async function processImage(imageUrl: string): Promise<string | null> {
       return null;
     }
     
+    const bgResultUrl = extractResultUrl(bgResult);
+    if (!bgResultUrl) {
+      console.error(`  No result URL from background removal for ${imageUrl}`);
+      return null;
+    }
+    
     // Upload background-removed image for enhance
     console.log(`  Uploading background-removed image for enhance...`);
-    const bgUpload = await uploadImage(bgResult.result_url, apiKey);
+    const bgUpload = await uploadImage(bgResultUrl, apiKey);
     
     // Enhance
     console.log(`  Creating photo enhance task...`);
     const enhanceTask = await createPhotoEnhanceTask(
-      { image_id: bgUpload.file_id },
+      { image_url: bgUpload.file_id },
       apiKey
     );
     console.log(`  Enhance task: ${enhanceTask.task_id}`);
@@ -109,10 +121,11 @@ async function processImage(imageUrl: string): Promise<string | null> {
     const enhanceResult = await pollTask(enhanceTask.task_id, "ai-photo-enhance");
     if (!enhanceResult) {
       console.error(`  Enhance failed for ${imageUrl}`);
-      return bgResult.result_url; // Return background-removed at least
+      return bgResultUrl; // Return background-removed at least
     }
     
-    return enhanceResult.result_url;
+    const enhanceResultUrl = extractResultUrl(enhanceResult);
+    return enhanceResultUrl ?? bgResultUrl;
   } catch (error) {
     console.error(`  Error processing ${imageUrl}:`, error);
     return null;
