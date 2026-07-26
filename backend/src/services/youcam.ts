@@ -1,12 +1,15 @@
 /**
  * YouCam (Perfect Corp) API Client
- * 
+ *
  * Based on: docs.perfectcorp.com AI Clothes API V3
- * 
+ *
  * Flow:
  * 1. Auth: Authorization: Bearer YOUR_API_KEY
- * 2. Create task with src_file_url (person) and ref_file_url (garment)
- * 3. Poll for result or use webhook
+ * 2. Upload: call the File API to get an upload URL + file_id, then PUT the image to that URL
+ * 3. Initiate: POST the task config (e.g. /s2s/v2.0/task/skin-analysis, or AI-Cloth for our case) → get back a task_id
+ * 4. Resolve: everything is async. Two ways to find out when it's done:
+ *    - Poll: GET /{task-type}/${task_id} until task_status is success/error
+ *    - Webhook: register an HTTPS endpoint once in the API Console; YouCam POSTs to it when the task finishes
  */
 
 import crypto from "crypto";
@@ -52,20 +55,69 @@ export interface PhotoEnhanceParams {
   image_url: string;
 }
 
+// ============================================================================
+// File Upload
+// ============================================================================
+
 /**
- * For AI-Cloth v3, we can use src_file_url and ref_file_url directly
+ * Upload an image to YouCam's File API.
+ * Step 1: GET /s2s/v2.0/file/upload-url to get upload_url + file_id
+ * Step 2: PUT the image bytes to upload_url
  */
 export async function uploadImage(
   imageUrl: string,
-  _apiKey: string
+  apiKey: string
 ): Promise<YouCamFileUploadResponse> {
   try {
     new URL(imageUrl);
   } catch {
     throw new Error(`Invalid image URL: ${imageUrl}`);
   }
-  console.log(`Using image URL directly: ${imageUrl}`);
-  return { file_id: imageUrl };
+
+  // Step 1: Get upload URL from YouCam File API
+  const uploadUrlResponse = await fetch(
+    `${YOUCAM_BASE_URL}/s2s/v2.0/file/upload-url`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    }
+  );
+
+  if (!uploadUrlResponse.ok) {
+    const error = await uploadUrlResponse.text();
+    throw new Error(`Failed to get upload URL: ${error}`);
+  }
+
+  const uploadData = (await uploadUrlResponse.json()) as YouCamApiResponse<{
+    upload_url: string;
+    file_id: string;
+  }>;
+  const { upload_url, file_id } = uploadData.data;
+
+  // Step 2: Fetch the image and PUT it to the upload URL
+  const imageResponse = await fetch(imageUrl);
+  if (!imageResponse.ok) {
+    throw new Error(`Failed to fetch image from ${imageUrl}`);
+  }
+  const imageBuffer = await imageResponse.arrayBuffer();
+
+  const putResponse = await fetch(upload_url, {
+    method: "PUT",
+    body: imageBuffer,
+    headers: {
+      "Content-Type": "application/octet-stream",
+    },
+  });
+
+  if (!putResponse.ok) {
+    const error = await putResponse.text();
+    throw new Error(`Failed to upload image to YouCam: ${error}`);
+  }
+
+  console.log(`Image uploaded to YouCam, file_id: ${file_id}`);
+  return { file_id };
 }
 
 // ============================================================================
@@ -102,7 +154,7 @@ export async function createAIClothTask(
 
   const apiResponse = await response.json() as YouCamApiResponse<{ task_id: string }>;
   console.log("Task created response:", apiResponse);
-  
+
   return {
     task_id: apiResponse.data.task_id,
     task_status: "processing",
@@ -175,15 +227,20 @@ export async function createPhotoEnhanceTask(
   };
 }
 
+// ============================================================================
+// Task Polling
+// ============================================================================
+
 /**
- * Poll task status for AI-Cloth v3
+ * Poll task status for any YouCam task type
  */
 export async function getTaskStatus(
   taskId: string,
+  taskType: string,
   apiKey: string
 ): Promise<YouCamTaskResponse> {
   const response = await fetch(
-    `${YOUCAM_BASE_URL}/s2s/v2.0/task/cloth-v3/${taskId}`,
+    `${YOUCAM_BASE_URL}/s2s/v2.0/task/${taskType}/${taskId}`,
     {
       method: "GET",
       headers: {
@@ -194,12 +251,147 @@ export async function getTaskStatus(
 
   if (!response.ok) {
     const error = await response.text();
-    throw new Error(`Failed to get task status: ${error}`);
+    throw new Error(`Failed to get task status for ${taskType}/${taskId}: ${error}`);
   }
 
   const apiResponse = await response.json() as YouCamApiResponse<YouCamTaskResponse>;
-  console.log("Task status response:", JSON.stringify(apiResponse, null, 2));
   return apiResponse.data;
+}
+
+/**
+ * Poll a YouCam task until it completes or times out
+ */
+export async function pollTask(
+  taskId: string,
+  taskType: string,
+  apiKey: string,
+  maxAttempts = 60,
+  pollIntervalMs = 5000
+): Promise<YouCamTaskResponse | null> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const status = await getTaskStatus(taskId, taskType, apiKey);
+
+    if (status.task_status === "success") {
+      return status;
+    }
+
+    if (status.task_status === "error") {
+      console.error(`Task ${taskId} failed:`, status.error);
+      return null;
+    }
+
+    console.log(`  Task ${taskId} still processing... (${i + 1}/${maxAttempts})`);
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  console.error(`Task ${taskId} timed out`);
+  return null;
+}
+
+// ============================================================================
+// Image Processing Pipeline
+// ============================================================================
+
+/**
+ * Process an image through background removal and enhancement.
+ * Returns the final processed image URL, or null on failure.
+ */
+export async function processImage(
+  imageUrl: string,
+  apiKey: string
+): Promise<string | null> {
+  try {
+    // Step 1: Upload image to YouCam
+    console.log(`  Uploading image...`);
+    const upload = await uploadImage(imageUrl, apiKey);
+    console.log(`  Uploaded, file_id: ${upload.file_id}`);
+
+    // Step 2: Background removal
+    console.log(`  Creating background removal task...`);
+    const bgRemovalTask = await createBackgroundRemovalTask(
+      { image_url: upload.file_id },
+      apiKey
+    );
+    console.log(`  Background removal task: ${bgRemovalTask.task_id}`);
+
+    const bgResult = await pollTask(
+      bgRemovalTask.task_id,
+      "ai-photo-background-removal",
+      apiKey
+    );
+    if (!bgResult) {
+      console.error(`  Background removal failed for ${imageUrl}`);
+      return null;
+    }
+
+    const bgResultUrl = extractResultUrl(bgResult);
+    if (!bgResultUrl) {
+      console.error(`  No result URL from background removal for ${imageUrl}`);
+      return null;
+    }
+
+    // Step 3: Upload background-removed image for enhancement
+    console.log(`  Uploading background-removed image for enhance...`);
+    const bgUpload = await uploadImage(bgResultUrl, apiKey);
+
+    // Step 4: Enhance
+    console.log(`  Creating photo enhance task...`);
+    const enhanceTask = await createPhotoEnhanceTask(
+      { image_url: bgUpload.file_id },
+      apiKey
+    );
+    console.log(`  Enhance task: ${enhanceTask.task_id}`);
+
+    const enhanceResult = await pollTask(
+      enhanceTask.task_id,
+      "ai-photo-enhance",
+      apiKey
+    );
+    if (!enhanceResult) {
+      console.error(`  Enhance failed for ${imageUrl}`);
+      return bgResultUrl; // Return background-removed at least
+    }
+
+    const enhanceResultUrl = extractResultUrl(enhanceResult);
+    return enhanceResultUrl ?? bgResultUrl;
+  } catch (error) {
+    console.error(`  Error processing ${imageUrl}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Process a user selfie through background removal and enhancement.
+ * Stores the result URL on the user_selfies record.
+ */
+export async function processSelfie(
+  selfieId: string,
+  imageUrl: string,
+  userId: string,
+  apiKey: string
+): Promise<string | null> {
+  console.log(`Processing selfie ${selfieId} for user ${userId}`);
+  const processedUrl = await processImage(imageUrl, apiKey);
+
+  if (processedUrl) {
+    const { db } = await import("../db/index.js");
+    const { userSelfies } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+
+    await db
+      .update(userSelfies)
+      .set({
+        processedImageUrl: processedUrl,
+        updatedAt: new Date(),
+      })
+      .where(eq(userSelfies.id, selfieId));
+
+    console.log(`Selfie ${selfieId} processed, stored at: ${processedUrl}`);
+  } else {
+    console.error(`Selfie ${selfieId} processing failed`);
+  }
+
+  return processedUrl;
 }
 
 // ============================================================================
@@ -306,16 +498,16 @@ export function extractResultUrl(response: YouCamTaskResponse): string | null {
   if (!response.results) {
     return null;
   }
-  
+
   // Handle both array and object formats
-  const results = Array.isArray(response.results) 
-    ? response.results 
+  const results = Array.isArray(response.results)
+    ? response.results
     : [response.results];
-  
+
   if (results.length === 0) {
     return null;
   }
-  
+
   const result = results[0];
   return result?.url || result?.result_image_url || null;
 }
