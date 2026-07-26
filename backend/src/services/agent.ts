@@ -15,8 +15,8 @@
  */
 
 import OpenAI from "openai";
-import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies } from "../db/index.js";
-import { eq, and, inArray, sql } from "drizzle-orm";
+import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies, carts, cartItems } from "../db/index.js";
+import { eq, and, sql } from "drizzle-orm";
 import { searchCatalog } from "./catalog-query.js";
 import { vectorSearchProducts } from "./vector.js";
 import {
