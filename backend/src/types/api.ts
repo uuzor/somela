@@ -38,8 +38,9 @@ export const ChatMessageSchema = z.object({
 });
 
 export const ChatRequestSchema = z.object({
-  sessionId: z.string().uuid().optional(),
+  sessionId: z.string().default(() => `session_${Date.now()}`),
   message: z.string().min(1).max(2000),
+  userId: z.string().optional(), // Optional user ID for authenticated users
   history: z.array(ChatMessageSchema).optional(),
 });
 

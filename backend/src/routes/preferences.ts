@@ -43,21 +43,21 @@ preferencesRouter.get("/", async (req, res) => {
     if (!prefs) {
       return res.json({
         category: null,
-        color: null,
+        colors: [],
         maxPrice: null,
         minPrice: null,
-        style: [],
-        size: null,
+        styles: [],
+        sizes: [],
       });
     }
     
     res.json({
       category: prefs.category,
-      color: prefs.color,
+      colors: prefs.preferredColors || [],
       maxPrice: prefs.maxPrice ? parseFloat(String(prefs.maxPrice)) : null,
       minPrice: prefs.minPrice ? parseFloat(String(prefs.minPrice)) : null,
-      style: prefs.style || [],
-      size: prefs.size,
+      styles: prefs.preferredStyles || [],
+      sizes: prefs.sizes || [],
     });
   } catch (error) {
     console.error("Preferences fetch error:", error);
@@ -100,11 +100,11 @@ preferencesRouter.put("/", async (req, res) => {
       
       res.json({
         category: updated.category,
-        color: updated.color,
-        maxPrice: updated.maxPrice ? parseFloat(updated.maxPrice) : null,
-        minPrice: updated.minPrice ? parseFloat(updated.minPrice) : null,
-        style: updated.style || [],
-        size: updated.size,
+        colors: updated.preferredColors || [],
+        maxPrice: updated.maxPrice ? parseFloat(String(updated.maxPrice)) : null,
+        minPrice: updated.minPrice ? parseFloat(String(updated.minPrice)) : null,
+        styles: updated.preferredStyles || [],
+        sizes: updated.sizes || [],
       });
     } else {
       // Create new
@@ -118,11 +118,11 @@ preferencesRouter.put("/", async (req, res) => {
       
       res.json({
         category: created.category,
-        color: created.color,
-        maxPrice: created.maxPrice ? parseFloat(created.maxPrice) : null,
-        minPrice: created.minPrice ? parseFloat(created.minPrice) : null,
-        style: created.style || [],
-        size: created.size,
+        colors: created.preferredColors || [],
+        maxPrice: created.maxPrice ? parseFloat(String(created.maxPrice)) : null,
+        minPrice: created.minPrice ? parseFloat(String(created.minPrice)) : null,
+        styles: created.preferredStyles || [],
+        sizes: created.sizes || [],
       });
     }
   } catch (error) {

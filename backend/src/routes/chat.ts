@@ -1,38 +1,108 @@
 import { Router } from "express";
-import { db, conversations, products } from "../db/index.js";
-import { eq } from "drizzle-orm";
+import { db, conversations, products, userPreferences, sessions } from "../db/index.js";
+import { eq, and } from "drizzle-orm";
 import { ChatRequestSchema } from "../types/api.js";
 import { strictRateLimit } from "../middleware/rateLimit.js";
+import { runAgent, isAgentAvailable, type ShoppingState, type AgentMessage } from "../services/agent.js";
 
 export const chatRouter = Router();
 
 // Apply strict rate limiting (chat is expensive)
 chatRouter.post("/", strictRateLimit);
 
-// Placeholder for AI-powered chat discovery - requires ANTHROPIC_API_KEY
-// Full implementation in Phase 3
-
 // POST /api/chat - Send a chat message
 chatRouter.post("/", async (req, res) => {
   try {
     const input = ChatRequestSchema.parse(req.body);
     
-    if (!process.env.ANTHROPIC_API_KEY) {
+    // Check for OpenAI or OpenRouter API key
+    if (!isAgentAvailable()) {
       return res.status(503).json({
         error: "Chat not available",
-        reason: "ANTHROPIC_API_KEY not configured",
+        reason: "OPENAI_API_KEY or OPENROUTER_API_KEY not configured",
       });
     }
     
-    // TODO: Implement discovery agent with Claude SDK
-    // For now, return placeholder
-    res.json({
-      reply: "AI chat discovery coming in Phase 3. Try /api/catalog for now!",
-      message: "Discovery agent not yet implemented",
+    // Get or create conversation
+    const { sessionId, message } = input;
+    const userId = input.userId || sessionId; // Use userId if provided, else sessionId
+    
+    // Load conversation history from DB
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(and(eq(conversations.userId, userId), eq(conversations.sessionId, sessionId)))
+      .limit(1);
+    
+    // Convert DB messages to agent format
+    const conversationHistory: AgentMessage[] = conversation?.messages 
+      ? (conversation.messages as any[]) 
+      : [];
+    
+    // Load shopping state
+    const [prefs] = await db
+      .select()
+      .from(userPreferences)
+      .where(eq(userPreferences.userId, userId))
+      .limit(1);
+    
+    // Build shopping state from preferences
+    const shoppingState: ShoppingState = {
+      activeFilters: {
+        category: prefs?.preferredStyles?.[0],
+        color: prefs?.preferredColors?.[0],
+        minPrice: undefined,
+        maxPrice: prefs?.maxPrice ? parseFloat(String(prefs.maxPrice)) : undefined,
+      },
+      visibleProductIds: [],
+    };
+    
+    // Run the agent
+    const result = await runAgent({
+      sessionId,
+      userId,
+      message,
+      conversationHistory,
+      shoppingState,
     });
+    
+    // Save conversation to DB
+    const newHistory: AgentMessage[] = [
+      ...conversationHistory,
+      { role: "user", content: message },
+      { role: "assistant", content: result.chatReply },
+    ];
+    
+    if (conversation) {
+      await db.update(conversations)
+        .set({ 
+          messages: newHistory as any,
+          lastPreferences: prefs as any,
+          updatedAt: new Date(),
+        })
+        .where(eq(conversations.id, conversation.id));
+    } else {
+      await db.insert(conversations).values({
+        userId,
+        sessionId,
+        messages: newHistory as any,
+        lastPreferences: prefs as any,
+      });
+    }
+    
+    res.json({
+      reply: result.chatReply,
+      uiPayload: result.uiPayload,
+      actions: result.actions,
+      conversationId: result.conversationId,
+    });
+    
   } catch (error) {
     console.error("Chat error:", error);
-    res.status(400).json({ error: "Invalid chat request", details: error });
+    res.status(500).json({ 
+      error: "Chat processing failed", 
+      details: error instanceof Error ? error.message : String(error),
+    });
   }
 });
 
