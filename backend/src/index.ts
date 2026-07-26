@@ -21,6 +21,11 @@ app.use("/api/tryon/webhook", express.raw({ type: "application/json", limit: "10
   next();
 });
 
+app.use("/api/visual-search/webhook", express.raw({ type: "application/json", limit: "10mb" }), (req, _res, next) => {
+  (req as any).rawBody = (req as any).body?.toString() || "";
+  next();
+});
+
 // JSON parsing for all other routes
 app.use(express.json({ limit: "10mb" }));
 
