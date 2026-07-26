@@ -7,6 +7,11 @@
  * - Payment: prepare, execute, status (split for confirmation)
  * 
  * Uses OpenAI SDK with OpenRouter or direct OpenAI API
+ * 
+ * HARDENING:
+ * - All AI-generated data is validated via Zod schemas
+ * - Streaming support for real-time UI updates
+ * - Tool results are validated before being used
  */
 
 import OpenAI from "openai";
@@ -14,6 +19,21 @@ import { db, products, productVariants, userPreferences, sessions, tryonTasks, u
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { searchCatalog } from "./catalog-query.js";
 import { vectorSearchProducts } from "./vector.js";
+import {
+  type ProductCard,
+  type UIPayload,
+  type UIAction,
+  type ShoppingState as ValidatedShoppingState,
+  type CatalogFilters as ValidatedCatalogFilters,
+  type AgentResponse as ValidatedAgentResponse,
+  safeValidateUIPayload,
+  safeValidateProducts,
+  formatSSEMessage,
+  type StreamingEvent,
+} from "./validation.js";
+
+// Re-export validated types
+export type { ProductCard, UIPayload, UIAction, ShoppingState, CatalogFilters, AgentResponse } from "./validation.js";
 
 // ============================================================================
 // Configuration
@@ -33,39 +53,10 @@ const openai = new OpenAI({
 });
 
 // ============================================================================
-// Types
+// Types (for internal use)
 // ============================================================================
 
-export interface Tool {
-  type: "function";
-  function: {
-    name: string;
-    description: string;
-    parameters: any;
-  };
-}
-
-export interface ShoppingState {
-  activeFilters: CatalogFilters;
-  visibleProductIds: string[];
-  focusedProductId?: string;
-  selectedVariantId?: string;
-  activeTryOnId?: string;
-  purchaseIntentId?: string;
-  checkoutStatus?: string;
-}
-
-export interface CatalogFilters {
-  query?: string;
-  category?: string;
-  color?: string;
-  minPrice?: number;
-  maxPrice?: number;
-  store?: string;
-  limit?: number;
-}
-
-export interface AgentMessage {
+interface AgentMessage {
   role: "user" | "assistant" | "tool";
   content: string;
   tool_calls?: Array<{
@@ -75,68 +66,28 @@ export interface AgentMessage {
   tool_call_id?: string;
 }
 
-export interface AgentResponse {
-  chatReply: string;
-  uiPayload: UIPayload;
-  actions: UIAction[];
-  conversationId: string;
-  updatedState?: Partial<ShoppingState>;
+interface Tool {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: any;
+  };
 }
 
-export type UIPayload =
-  | { type: "replace_catalog"; products: ProductCard[] }
-  | { type: "show_product"; product: ProductCard }
-  | { type: "suggest_try_on"; product: ProductCard }
-  | { type: "try_on_started"; tryOnId: string }
-  | { type: "try_on_completed"; resultUrl: string }
-  | { type: "confirm_purchase"; purchase: PurchaseSummary }
-  | { type: "payment_pending"; purchaseIntentId: string }
-  | { type: "order_confirmed"; order: OrderSummary }
-  | { type: "error"; code: string; message: string };
+// Streaming callback type
+export type StreamingCallback = (event: StreamingEvent) => void;
 
-export interface UIAction {
-  type: "suggest_try_on" | "confirm_checkout" | string;
-  productId?: string;
-  tryOnId?: string;
-}
+// ============================================================================
+// Default/Empty Validators
+// ============================================================================
 
-export interface ProductCard {
-  productId: string;
-  title: string;
-  images: string[];
-  minPrice: number | null;
-  maxPrice: number | null;
-  category: string | null;
-  url: string | null;
-  availableVariants?: VariantInfo[];
-}
+const DEFAULT_UI_PAYLOAD: UIPayload = {
+  type: "replace_catalog",
+  products: [],
+};
 
-export interface VariantInfo {
-  variantId: string;
-  color?: string;
-  size?: string;
-  inStock: boolean;
-}
-
-export interface PurchaseSummary {
-  productId: string;
-  variantId: string;
-  productName: string;
-  variant: string;
-  merchant: string;
-  itemPrice: number;
-  shipping: number;
-  taxes: number;
-  total: number;
-  currency: string;
-}
-
-export interface OrderSummary {
-  orderId: string;
-  productName: string;
-  status: string;
-  total: number;
-}
+const DEFAULT_ACTIONS: UIAction[] = [];
 
 // ============================================================================
 // Agent Tools
@@ -657,8 +608,49 @@ export interface RunAgentOptions {
   shoppingState?: ShoppingState;
 }
 
+/**
+ * Run the agent (non-streaming version)
+ * Uses validated types from validation.ts
+ */
 export async function runAgent(options: RunAgentOptions): Promise<AgentResponse> {
-  const { sessionId, userId, message, conversationHistory = [], shoppingState } = options;
+  // Collect events for final response
+  let finalReply = "";
+  let actions: UIAction[] = [];
+  let uiPayload: UIPayload = DEFAULT_UI_PAYLOAD;
+
+  // Streaming callback that collects final state
+  const collectEvent = (event: StreamingEvent) => {
+    if (event.event === "text") {
+      finalReply += event.data;
+    } else if (event.event === "ui_action") {
+      actions.push(event.data);
+    } else if (event.event === "ui_payload") {
+      uiPayload = event.data;
+    }
+  };
+
+  // Run streaming version
+  await runAgentStream({ ...options, onEvent: collectEvent });
+
+  // Validate and return
+  return {
+    chatReply: finalReply || "I'm not sure how to help with that.",
+    uiPayload: safeValidateUIPayload(uiPayload),
+    actions: actions.slice(0, 10), // Limit actions
+    conversationId: options.sessionId,
+  };
+}
+
+export interface RunAgentStreamOptions extends RunAgentOptions {
+  onEvent: StreamingCallback;
+}
+
+/**
+ * Run the agent with streaming support
+ * Sends events to the frontend via the callback
+ */
+export async function runAgentStream(options: RunAgentStreamOptions): Promise<void> {
+  const { sessionId, userId, message, conversationHistory = [], shoppingState, onEvent } = options;
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: SYSTEM_PROMPT },
@@ -678,7 +670,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
   }
 
   // Add conversation history
-  for (const msg of conversationHistory.slice(-10)) { // Last 10 messages
+  for (const msg of conversationHistory.slice(-10)) {
     if (msg.role === "user") {
       messages.push({ role: "user", content: msg.content });
     } else if (msg.role === "assistant") {
@@ -689,7 +681,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
   // Add current message
   messages.push({ role: "user", content: message });
 
-  // Build tool definitions for OpenAI format
+  // Build tool definitions
   const toolDefs: OpenAI.Chat.ChatCompletionTool[] = TOOLS.map(t => ({
     type: "function" as const,
     function: {
@@ -702,107 +694,152 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
   let assistantMessage: string = "";
   let toolResults: Array<{ role: "tool"; tool_call_id: string; content: string }> = [];
   let actions: UIAction[] = [];
-  let uiPayload: UIPayload = { type: "replace_catalog", products: [] };
+  let uiPayload: UIPayload = DEFAULT_UI_PAYLOAD;
 
   // Agent loop (max 8 iterations)
   for (let turn = 0; turn < 8; turn++) {
-    const response = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages,
-      tools: toolDefs,
-      tool_choice: "auto",
-      max_tokens: 2048,
-    });
+    try {
+      const response = await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages,
+        tools: toolDefs,
+        tool_choice: "auto",
+        max_tokens: 2048,
+      });
 
-    const choice = response.choices[0];
-    if (!choice.message) break;
+      const choice = response.choices[0];
+      if (!choice.message) break;
 
-    // Handle text response
-    if (choice.message.content) {
-      assistantMessage = choice.message.content;
-    }
+      // Handle text response - stream it
+      if (choice.message.content) {
+        assistantMessage = choice.message.content;
+        onEvent({ event: "text", data: choice.message.content });
+      }
 
-    // Handle tool calls
-    const toolCalls = (choice.message as any).tool_calls;
-    if (toolCalls && toolCalls.length > 0) {
-      for (const toolCall of toolCalls) {
-        const toolName = toolCall.function?.name || toolCall.name;
-        const args = JSON.parse(toolCall.function?.arguments || "{}");
-        
-        // Inject userId where needed
-        if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "prepare_purchase", "execute_prava_checkout"].includes(toolName)) {
-          args.userId = userId;
-        }
+      // Handle tool calls
+      const toolCalls = (choice.message as any).tool_calls;
+      if (toolCalls && toolCalls.length > 0) {
+        for (const toolCall of toolCalls) {
+          const toolName = toolCall.function?.name || toolCall.name;
+          const args = JSON.parse(toolCall.function?.arguments || "{}");
+          
+          // Stream tool call event
+          onEvent({
+            event: "tool_call",
+            data: { name: toolName, arguments: args },
+          });
 
-        // Find and execute tool
-        const tool = TOOLS.find(t => t.name === toolName);
-        if (tool) {
-          try {
-            const result = await tool.handler(args);
-            
-            // Track special results
-            if (toolName === "search_catalog" && result.products) {
-              uiPayload = {
-                type: "replace_catalog",
-                products: result.products.slice(0, 12),
-              };
-            } else if (toolName === "suggest_try_on" && result.suggestion) {
-              actions.push({
-                type: "suggest_try_on",
-                productId: result.suggestion.productId,
+          // Inject userId where needed
+          if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "prepare_purchase", "execute_prava_checkout"].includes(toolName)) {
+            args.userId = userId;
+          }
+
+          // Find and execute tool
+          const tool = TOOLS.find(t => t.name === toolName);
+          if (tool) {
+            try {
+              const result = await tool.handler(args);
+              
+              // Stream tool result
+              onEvent({
+                event: "tool_result",
+                data: { name: toolName, result },
+              });
+
+              // Validate and track special results
+              if (toolName === "search_catalog" && result.products) {
+                // Validate products
+                const validProducts = safeValidateProducts(result.products);
+                uiPayload = {
+                  type: "replace_catalog",
+                  products: validProducts.slice(0, 12),
+                };
+                onEvent({ event: "ui_payload", data: uiPayload });
+              } else if (toolName === "suggest_try_on" && result.suggestion) {
+                const action: UIAction = {
+                  type: "suggest_try_on",
+                  productId: result.suggestion.productId,
+                };
+                actions.push(action);
+                onEvent({ event: "ui_action", data: action });
+              } else if (toolName === "prepare_purchase" && result.purchaseIntentId) {
+                // Validate purchase summary
+                const purchase = {
+                  productId: result.productId || "",
+                  variantId: result.variantId || "",
+                  productName: result.productName || "",
+                  variant: result.variant || "Standard",
+                  merchant: result.merchant || "Partner Store",
+                  itemPrice: typeof result.itemPrice === "number" ? result.itemPrice : 0,
+                  shipping: typeof result.shipping === "number" ? result.shipping : 0,
+                  taxes: typeof result.taxes === "number" ? result.taxes : 0,
+                  total: typeof result.total === "number" ? result.total : 0,
+                  currency: result.currency || "USD",
+                };
+                uiPayload = {
+                  type: "confirm_purchase",
+                  purchase,
+                };
+                onEvent({ event: "ui_payload", data: uiPayload });
+              }
+
+              toolResults.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(result),
+              });
+            } catch (error: any) {
+              console.error(`Tool ${toolName} error:`, error);
+              toolResults.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({ error: error.message }),
               });
             }
-
+          } else {
             toolResults.push({
               role: "tool",
               tool_call_id: toolCall.id,
-              content: JSON.stringify(result),
-            });
-          } catch (error: any) {
-            toolResults.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content: JSON.stringify({ error: error.message }),
+              content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
             });
           }
-        } else {
-          toolResults.push({
-            role: "tool",
-            tool_call_id: toolCall.id,
-            content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
-          });
         }
-      }
 
-      // Add assistant message
-      messages.push(choice.message as OpenAI.Chat.ChatCompletionMessage);
-
-      // Add all tool results properly
-      for (const result of toolResults) {
-        messages.push({
-          role: "tool",
-          tool_call_id: result.tool_call_id,
-          content: result.content,
-        } as any);
+        // Add assistant message and tool results
+        messages.push(choice.message as OpenAI.Chat.ChatCompletionMessage);
+        for (const result of toolResults) {
+          messages.push({
+            role: "tool",
+            tool_call_id: result.tool_call_id,
+            content: result.content,
+          } as any);
+        }
+      } else {
+        // No tool calls, we're done
+        break;
       }
-    } else {
-      // No tool calls, we're done
+    } catch (error: any) {
+      console.error("Agent loop error:", error);
+      onEvent({
+        event: "error",
+        data: {
+          code: "AGENT_ERROR",
+          message: error.message || "An error occurred",
+        },
+      });
       break;
     }
   }
 
-  // If no response, use last assistant message
-  if (!assistantMessage && messages.length > 0) {
-    const lastAssistant = messages.filter(m => m.role === "assistant").pop();
-    assistantMessage = (lastAssistant as any)?.content || "I'm not sure how to help with that.";
-  }
-
-  return {
-    chatReply: assistantMessage,
-    uiPayload,
-    actions,
-    conversationId: sessionId,
-  };
+  // Send final event with complete response
+  onEvent({
+    event: "done",
+    data: {
+      reply: assistantMessage || "I'm not sure how to help with that.",
+      uiPayload: safeValidateUIPayload(uiPayload),
+      actions: actions.slice(0, 10),
+    },
+  });
 }
 
 // ============================================================================
