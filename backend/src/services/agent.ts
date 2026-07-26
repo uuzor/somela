@@ -774,13 +774,8 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
         }
       }
 
-      // Add assistant message and tool results
+      // Add assistant message
       messages.push(choice.message as OpenAI.Chat.ChatCompletionMessage);
-      messages.push({
-        role: "tool",
-        tool_call_id: toolResults[toolResults.length - 1]?.tool_call_id || "",
-        content: `[${toolResults.length} tool results received]`,
-      } as any);
 
       // Add all tool results properly
       for (const result of toolResults) {
