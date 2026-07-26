@@ -4,8 +4,9 @@ import { eq } from "drizzle-orm";
 import { TryonRequestSchema } from "../types/api.js";
 import { tryonRateLimit } from "../middleware/rateLimit.js";
 import {
-  uploadImage,
   createAIClothTask,
+  getTaskStatus,
+  extractResultUrl,
   getYouCamApiKey,
   getYouCamWebhookSecret,
   verifyWebhookSignature,
@@ -64,7 +65,7 @@ tryonRouter.post("/", async (req, res) => {
     }
     
     // Get garment image URL (use first image or processed image)
-    const garmentImageUrl = product.processedImages?.[0] || product.images?.[0];
+    const garmentImageUrl = (product as any).processedImages?.[0] || product.images?.[0];
     if (!garmentImageUrl) {
       return res.status(400).json({ error: "No product images available" });
     }
@@ -72,25 +73,22 @@ tryonRouter.post("/", async (req, res) => {
     // Get selfie URL (use processed if available)
     const selfieImageUrl = selfie.processedImageUrl || selfie.imageUrl;
     
-    // Upload images to YouCam
+    // Call YouCam API with direct URLs (v3 API)
     const apiKey = getYouCamApiKey();
-    console.log("Uploading garment image:", garmentImageUrl);
-    const garmentUpload = await uploadImage(garmentImageUrl, apiKey);
-    console.log("Garment uploaded, file_id:", garmentUpload.file_id);
+    console.log("Creating AI-Cloth task with:");
+    console.log("  Selfie URL:", selfieImageUrl);
+    console.log("  Garment URL:", garmentImageUrl);
     
-    console.log("Uploading selfie image:", selfieImageUrl);
-    const selfieUpload = await uploadImage(selfieImageUrl, apiKey);
-    console.log("Selfie uploaded, file_id:", selfieUpload.file_id);
-    
-    // Create AI-Cloth task
     const taskResponse = await createAIClothTask(
       {
-        cloth_image_id: garmentUpload.file_id,
-        person_image_id: selfieUpload.file_id,
+        src_file_url: selfieImageUrl,
+        ref_file_url: garmentImageUrl,
+        garment_category: "upper_body",
       },
       apiKey
     );
-    console.log("AI-Cloth task created:", taskResponse.task_id);
+    
+    console.log("AI-Cloth task created:", taskResponse.task_id, "status:", taskResponse.task_status);
     
     // Create task record in DB
     const [task] = await db.insert(tryonTasks).values({
@@ -103,8 +101,11 @@ tryonRouter.post("/", async (req, res) => {
     
     res.status(201).json({
       taskId: task.id,
-      status: "processing",
-      message: "Processing try-on...",
+      status: taskResponse.task_status,
+      externalTaskId: taskResponse.task_id,
+      message: taskResponse.task_status === "success" 
+        ? "Try-on complete!" 
+        : "Processing try-on...",
     });
   } catch (error) {
     console.error("Try-on error:", error);
@@ -125,6 +126,60 @@ tryonRouter.get("/:taskId", async (req, res) => {
     
     if (!task) {
       return res.status(404).json({ error: "Try-on task not found" });
+    }
+    
+    // If task is still processing, poll YouCam for latest status
+    if (task.status === "processing" && task.externalTaskId && isYouCamConfigured()) {
+      try {
+        const apiKey = getYouCamApiKey();
+        const youcamStatus = await getTaskStatus(task.externalTaskId, apiKey);
+        
+        console.log(`Polled YouCam for task ${task.externalTaskId}:`, youcamStatus.task_status);
+        
+        const resultUrl = extractResultUrl(youcamStatus);
+        
+        // Update local status if changed
+        if (youcamStatus.task_status === "success" && resultUrl) {
+          await db
+            .update(tryonTasks)
+            .set({
+              status: "completed",
+              resultImageUrl: resultUrl,
+              completedAt: new Date(),
+            })
+            .where(eq(tryonTasks.id, task.id));
+          
+          return res.json({
+            taskId: task.id,
+            status: "completed",
+            productIds: task.productIds,
+            resultImageUrl: resultUrl,
+            completedAt: new Date().toISOString(),
+          });
+        }
+        
+        if (youcamStatus.task_status === "error") {
+          await db
+            .update(tryonTasks)
+            .set({
+              status: "failed",
+              errorMessage: youcamStatus.error?.message || "YouCam processing failed",
+              completedAt: new Date(),
+            })
+            .where(eq(tryonTasks.id, task.id));
+          
+          return res.json({
+            taskId: task.id,
+            status: "failed",
+            productIds: task.productIds,
+            errorMessage: youcamStatus.error?.message || "YouCam processing failed",
+            completedAt: new Date().toISOString(),
+          });
+        }
+      } catch (pollError) {
+        console.error("Failed to poll YouCam:", pollError);
+        // Continue with local status
+      }
     }
     
     res.json({
@@ -223,17 +278,18 @@ tryonRouter.post("/webhook", async (req, res) => {
     }
     
     // Update task based on status
-    if (payload.task_status === "success" && payload.result) {
+    if (payload.task_status === "success" && payload.results?.[0]) {
+      const resultUrl = payload.results[0].url || payload.results[0].result_image_url;
       await db
         .update(tryonTasks)
         .set({
           status: "completed",
-          resultImageUrl: payload.result.result_image_url,
+          resultImageUrl: resultUrl,
           completedAt: new Date(),
         })
         .where(eq(tryonTasks.id, task.id));
       
-      console.log(`Try-on task ${task.id} completed with result:`, payload.result.result_image_url);
+      console.log(`Try-on task ${task.id} completed with result:`, resultUrl);
     } else if (payload.task_status === "error") {
       await db
         .update(tryonTasks)

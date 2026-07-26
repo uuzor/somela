@@ -1,30 +1,32 @@
 /**
  * YouCam (Perfect Corp) API Client
  * 
- * Based on: docs.perfectcorp.com AI Clothes API
+ * Based on: docs.perfectcorp.com AI Clothes API V3
  * 
  * Flow:
  * 1. Auth: Authorization: Bearer YOUR_API_KEY
- * 2. Upload: File API to get upload URL + file_id, then PUT the image
- * 3. Initiate: POST to task endpoint → get task_id
- * 4. Resolve: Poll or Webhook (we use webhook for real-time)
+ * 2. Create task with src_file_url (person) and ref_file_url (garment)
+ * 3. Poll for result or use webhook
  */
 
 import crypto from "crypto";
 
-const YOUCAM_BASE_URL = "https://v2-api.yce.perfectcorp.com";
+const YOUCAM_BASE_URL = "https://yce-api-01.makeupar.com";
 
-// Type definitions
+// Type definitions - YouCam API wraps responses in { status, data }
+interface YouCamApiResponse<T> {
+  status: number;
+  data: T;
+}
+
 export interface YouCamFileUploadResponse {
   file_id: string;
-  file_upload_url: string;
-  expires_at: string;
 }
 
 export interface YouCamTaskResponse {
   task_id: string;
-  task_status: "pending" | "processing" | "success" | "error";
-  result?: YouCamTaskResult;
+  task_status: "pending" | "processing" | "running" | "success" | "error";
+  results?: Array<{ url: string; result_image_url?: string }> | { url: string; result_image_url?: string };
   error?: {
     code: string;
     message: string;
@@ -32,134 +34,53 @@ export interface YouCamTaskResponse {
 }
 
 export interface YouCamTaskResult {
-  result_image_url: string;
-  // Other fields depend on task type
+  url: string;
+  result_image_url?: string;
 }
 
 export interface AIClothTaskParams {
-  cloth_image_id: string;  // file_id from uploaded garment image
-  person_image_id: string; // file_id from uploaded selfie
+  src_file_url: string;   // URL of the person/selfie image
+  ref_file_url: string;  // URL of the garment/clothing image
+  garment_category?: "upper_body" | "lower_body" | "full_body";
 }
 
 export interface BackgroundRemovalParams {
-  image_id: string;  // file_id from uploaded image
+  image_url: string;
 }
 
 export interface PhotoEnhanceParams {
-  image_id: string;  // file_id from uploaded image
+  image_url: string;
 }
 
 /**
- * Upload an image to YouCam and get a file_id
- * 
- * Steps:
- * 1. GET /s2s/v2.0/file/upload-url to get upload URL
- * 2. PUT image to that URL
- * 3. Use returned file_id for task creation
+ * For AI-Cloth v3, we can use src_file_url and ref_file_url directly
  */
 export async function uploadImage(
   imageUrl: string,
-  apiKey: string
+  _apiKey: string
 ): Promise<YouCamFileUploadResponse> {
-  // Step 1: Get upload URL
-  const uploadUrlResponse = await fetch(
-    `${YOUCAM_BASE_URL}/s2s/v2.0/file/upload-url`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  if (!uploadUrlResponse.ok) {
-    const error = await uploadUrlResponse.text();
-    throw new Error(`Failed to get upload URL: ${error}`);
+  try {
+    new URL(imageUrl);
+  } catch {
+    throw new Error(`Invalid image URL: ${imageUrl}`);
   }
-
-  const { file_id, file_upload_url, expires_at } = await uploadUrlResponse.json() as YouCamFileUploadResponse;
-
-  // Step 2: Fetch the image from the URL and upload to YouCam
-  const imageResponse = await fetch(imageUrl);
-  if (!imageResponse.ok) {
-    throw new Error(`Failed to fetch image from ${imageUrl}`);
-  }
-  const imageBuffer = await imageResponse.arrayBuffer();
-
-  // Step 3: PUT the image to the upload URL
-  const uploadResponse = await fetch(file_upload_url, {
-    method: "PUT",
-    body: imageBuffer,
-    headers: {
-      "Content-Type": "image/jpeg", // Adjust based on actual image type
-    },
-  });
-
-  if (!uploadResponse.ok) {
-    const error = await uploadResponse.text();
-    throw new Error(`Failed to upload image: ${error}`);
-  }
-
-  return { file_id, file_upload_url, expires_at };
+  console.log(`Using image URL directly: ${imageUrl}`);
+  return { file_id: imageUrl };
 }
 
-/**
- * Upload image from a buffer (for local file uploads)
- */
-export async function uploadImageBuffer(
-  buffer: Buffer,
-  contentType: string,
-  apiKey: string
-): Promise<YouCamFileUploadResponse> {
-  // Step 1: Get upload URL
-  const uploadUrlResponse = await fetch(
-    `${YOUCAM_BASE_URL}/s2s/v2.0/file/upload-url`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  if (!uploadUrlResponse.ok) {
-    const error = await uploadUrlResponse.text();
-    throw new Error(`Failed to get upload URL: ${error}`);
-  }
-
-  const { file_id, file_upload_url, expires_at } = await uploadUrlResponse.json() as YouCamFileUploadResponse;
-
-  // Step 2: PUT the image to the upload URL
-  const uploadResponse = await fetch(file_upload_url, {
-    method: "PUT",
-    body: buffer,
-    headers: {
-      "Content-Type": contentType,
-    },
-  });
-
-  if (!uploadResponse.ok) {
-    const error = await uploadResponse.text();
-    throw new Error(`Failed to upload image: ${error}`);
-  }
-
-  return { file_id, file_upload_url, expires_at };
-}
+// ============================================================================
+// Task APIs
+// ============================================================================
 
 /**
- * Create an AI-Cloth task for virtual try-on
- * 
- * Direct type: no template lookup needed
- * Takes garment image + person image → returns result image
+ * Create an AI-Cloth v3 task for virtual try-on
  */
 export async function createAIClothTask(
   params: AIClothTaskParams,
   apiKey: string
 ): Promise<YouCamTaskResponse> {
   const response = await fetch(
-    `${YOUCAM_BASE_URL}/s2s/v2.0/task/ai-cloth`,
+    `${YOUCAM_BASE_URL}/s2s/v2.0/task/cloth-v3`,
     {
       method: "POST",
       headers: {
@@ -167,8 +88,9 @@ export async function createAIClothTask(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        cloth_image_id: params.cloth_image_id,
-        person_image_id: params.person_image_id,
+        src_file_url: params.src_file_url,
+        ref_file_url: params.ref_file_url,
+        garment_category: params.garment_category || "upper_body",
       }),
     }
   );
@@ -178,7 +100,13 @@ export async function createAIClothTask(
     throw new Error(`Failed to create AI-Cloth task: ${error}`);
   }
 
-  return response.json() as unknown as YouCamTaskResponse;
+  const apiResponse = await response.json() as YouCamApiResponse<{ task_id: string }>;
+  console.log("Task created response:", apiResponse);
+  
+  return {
+    task_id: apiResponse.data.task_id,
+    task_status: "processing",
+  };
 }
 
 /**
@@ -197,7 +125,7 @@ export async function createBackgroundRemovalTask(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        image_id: params.image_id,
+        image_url: params.image_url,
       }),
     }
   );
@@ -207,7 +135,11 @@ export async function createBackgroundRemovalTask(
     throw new Error(`Failed to create background removal task: ${error}`);
   }
 
-  return response.json() as unknown as YouCamTaskResponse;
+  const apiResponse = await response.json() as YouCamApiResponse<{ task_id: string }>;
+  return {
+    task_id: apiResponse.data.task_id,
+    task_status: "processing",
+  };
 }
 
 /**
@@ -226,7 +158,7 @@ export async function createPhotoEnhanceTask(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        image_id: params.image_id,
+        image_url: params.image_url,
       }),
     }
   );
@@ -236,19 +168,22 @@ export async function createPhotoEnhanceTask(
     throw new Error(`Failed to create photo enhance task: ${error}`);
   }
 
-  return response.json() as unknown as YouCamTaskResponse;
+  const apiResponse = await response.json() as YouCamApiResponse<{ task_id: string }>;
+  return {
+    task_id: apiResponse.data.task_id,
+    task_status: "processing",
+  };
 }
 
 /**
- * Poll task status
+ * Poll task status for AI-Cloth v3
  */
 export async function getTaskStatus(
   taskId: string,
-  taskType: "ai-cloth" | "ai-photo-background-removal" | "ai-photo-enhance",
   apiKey: string
 ): Promise<YouCamTaskResponse> {
   const response = await fetch(
-    `${YOUCAM_BASE_URL}/s2s/v2.0/task/${taskType}/${taskId}`,
+    `${YOUCAM_BASE_URL}/s2s/v2.0/task/cloth-v3/${taskId}`,
     {
       method: "GET",
       headers: {
@@ -262,7 +197,9 @@ export async function getTaskStatus(
     throw new Error(`Failed to get task status: ${error}`);
   }
 
-  return response.json() as unknown as YouCamTaskResponse;
+  const apiResponse = await response.json() as YouCamApiResponse<YouCamTaskResponse>;
+  console.log("Task status response:", JSON.stringify(apiResponse, null, 2));
+  return apiResponse.data;
 }
 
 // ============================================================================
@@ -271,35 +208,18 @@ export async function getTaskStatus(
 
 /**
  * Verify YouCam webhook signature
- * 
- * Signature scheme: HMAC-SHA256
- * Signed content: {webhook-id}.{webhook-timestamp}.{raw-minified-json-body}
- * 
- * @param payload Raw request body as string
- * @param signature Signature from header (whsec_xxxxx)
- * @param secret Webhook secret from YouCam console
  */
 export function verifyWebhookSignature(
   payload: string,
   signature: string,
   secret: string
 ): boolean {
-  // Extract the actual base64-encoded secret (remove whsec_ prefix if present)
-  let actualSecret = secret;
-  if (secret.startsWith("whsec_")) {
-    actualSecret = secret.slice(6);
-  }
-
-  // The secret is base64-encoded - decode it
-  const secretBuffer = Buffer.from(actualSecret, "base64");
-
-  // Compute expected signature
+  const secretBuffer = Buffer.from(secret, "base64");
   const expectedSignature = crypto
     .createHmac("sha256", secretBuffer)
     .update(payload)
     .digest("base64");
 
-  // Use timing-safe comparison
   try {
     return crypto.timingSafeEqual(
       Buffer.from(signature),
@@ -317,9 +237,9 @@ export interface YouCamWebhookPayload {
   webhook_id: string;
   webhook_timestamp: number;
   task_id: string;
-  task_type: "ai-cloth" | "ai-photo-background-removal" | "ai-photo-enhance";
+  task_type: "cloth-v3" | "ai-photo-background-removal" | "ai-photo-enhance";
   task_status: "success" | "error";
-  result?: YouCamTaskResult;
+  results?: YouCamTaskResult[];
   error?: {
     code: string;
     message: string;
@@ -328,11 +248,6 @@ export interface YouCamWebhookPayload {
 
 /**
  * Verify and parse webhook request
- * 
- * @param payload Raw request body as string
- * @param signature Signature from header
- * @param secret Webhook secret
- * @returns Parsed payload if valid, throws if invalid
  */
 export function verifyAndParseWebhook(
   payload: string,
@@ -377,9 +292,30 @@ export function getYouCamApiKey(): string {
  * Get YouCam webhook secret
  */
 export function getYouCamWebhookSecret(): string {
-  const secret = process.env.YOUCAM_WEBHOOK_SECRET;
+  const secret = process.env.YOUCAM_SECRET_KEY;
   if (!secret) {
-    throw new Error("YOUCAM_WEBHOOK_SECRET not configured");
+    throw new Error("YOUCAM_SECRET_KEY not configured");
   }
   return secret;
+}
+
+/**
+ * Extract result URL from task response
+ */
+export function extractResultUrl(response: YouCamTaskResponse): string | null {
+  if (!response.results) {
+    return null;
+  }
+  
+  // Handle both array and object formats
+  const results = Array.isArray(response.results) 
+    ? response.results 
+    : [response.results];
+  
+  if (results.length === 0) {
+    return null;
+  }
+  
+  const result = results[0];
+  return result?.url || result?.result_image_url || null;
 }
