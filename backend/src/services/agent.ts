@@ -30,6 +30,7 @@ import {
   safeValidateProducts,
   formatSSEMessage,
   type StreamingEvent,
+  type ChatMessage,
 } from "./validation.js";
 
 // Re-export validated types
@@ -629,8 +630,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResponse>
     }
   };
 
-  // Run streaming version
-  await runAgentStream({ ...options, onEvent: collectEvent });
+  // Run streaming version and capture full message history
+  const messages = await runAgentStream({ ...options, onEvent: collectEvent });
 
   // Validate and return
   return {
@@ -638,6 +639,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResponse>
     uiPayload: safeValidateUIPayload(uiPayload),
     actions: actions.slice(0, 10), // Limit actions
     conversationId: options.sessionId,
+    messages,
   };
 }
 
@@ -649,7 +651,7 @@ export interface RunAgentStreamOptions extends RunAgentOptions {
  * Run the agent with streaming support
  * Sends events to the frontend via the callback
  */
-export async function runAgentStream(options: RunAgentStreamOptions): Promise<void> {
+export async function runAgentStream(options: RunAgentStreamOptions): Promise<any[]> {
   const { sessionId, userId, message, conversationHistory = [], shoppingState, onEvent } = options;
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -831,15 +833,18 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
     }
   }
 
-  // Send final event with complete response
+   // Send final event with complete response
   onEvent({
     event: "done",
     data: {
       reply: assistantMessage || "I'm not sure how to help with that.",
       uiPayload: safeValidateUIPayload(uiPayload),
       actions: actions.slice(0, 10),
+      messages: messages as any,
     },
   });
+
+  return messages;
 }
 
 // ============================================================================
