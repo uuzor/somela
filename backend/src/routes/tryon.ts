@@ -11,6 +11,7 @@ import {
   getYouCamWebhookSecret,
   verifyWebhookSignature,
   isYouCamConfigured,
+  processSelfie,
   type YouCamWebhookPayload,
 } from "../services/youcam.js";
 
@@ -132,7 +133,7 @@ tryonRouter.get("/:taskId", async (req, res) => {
     if (task.status === "processing" && task.externalTaskId && isYouCamConfigured()) {
       try {
         const apiKey = getYouCamApiKey();
-        const youcamStatus = await getTaskStatus(task.externalTaskId, apiKey);
+        const youcamStatus = await getTaskStatus(task.externalTaskId, "cloth-v3", apiKey);
         
         console.log(`Polled YouCam for task ${task.externalTaskId}:`, youcamStatus.task_status);
         
@@ -209,20 +210,28 @@ tryonRouter.post("/selfie", async (req, res) => {
     if (!imageUrl) {
       return res.status(400).json({ error: "imageUrl required" });
     }
-    
-    // TODO: Implement YouCam selfie prep
-    
+
     // Create selfie record
     const [selfie] = await db.insert(userSelfies).values({
       userId,
       imageUrl,
       isDefault: true,
     }).returning();
-    
+
+    // Trigger async selfie prep (background removal + enhancement)
+    if (isYouCamConfigured()) {
+      const apiKey = getYouCamApiKey();
+      processSelfie(selfie.id, imageUrl, userId, apiKey).catch((err) => {
+        console.error(`Async selfie prep failed for ${selfie.id}:`, err);
+      });
+    }
+
     res.status(201).json({
       selfieId: selfie.id,
       imageUrl: selfie.imageUrl,
-      message: "Selfie uploaded (prep coming in Phase 3)",
+      processedImageUrl: null,
+      status: "processing",
+      message: "Selfie uploaded, processing in background",
     });
   } catch (error) {
     console.error("Selfie upload error:", error);

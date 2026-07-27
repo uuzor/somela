@@ -124,3 +124,20 @@ export const UserPreferencesUpdateSchema = z.object({
 });
 
 export type UserPreferencesUpdate = z.infer<typeof UserPreferencesUpdateSchema>;
+
+// ============================================================================
+// Cart API
+// ============================================================================
+
+export const AddCartItemSchema = z.object({
+  productId: z.string().min(1),
+  variantId: z.string().optional(),
+  quantity: z.number().int().positive().default(1),
+});
+
+export const UpdateCartItemSchema = z.object({
+  quantity: z.number().int().positive(),
+});
+
+export type AddCartItem = z.infer<typeof AddCartItemSchema>;
+export type UpdateCartItem = z.infer<typeof UpdateCartItemSchema>;

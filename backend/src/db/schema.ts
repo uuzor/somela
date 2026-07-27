@@ -274,6 +274,36 @@ export const conversations = pgTable("conversations", {
 }));
 
 // ============================================================================
+// CARTS (Shopping Cart)
+// ============================================================================
+
+export const carts = pgTable("carts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  sessionId: text("session_id"),
+  status: varchar("status", { length: 50 }).default("active").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("carts_user_id_idx").on(table.userId),
+  sessionIdIdx: index("carts_session_id_idx").on(table.sessionId),
+  statusIdx: index("carts_status_idx").on(table.status),
+}));
+
+export const cartItems = pgTable("cart_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  cartId: uuid("cart_id").notNull().references(() => carts.id, { onDelete: "cascade" }),
+  productId: text("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  variantId: text("variant_id"),
+  quantity: serial("quantity").default(1).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  cartIdIdx: index("cart_items_cart_id_idx").on(table.cartId),
+  productIdIdx: index("cart_items_product_id_idx").on(table.productId),
+}));
+
+// ============================================================================
 // TYPE EXPORTS (for use in application code)
 // ============================================================================
 
@@ -402,5 +432,28 @@ export const conversationsRelations = relations(conversations, ({ one }) => ({
   session: one(sessions, {
     fields: [conversations.sessionId],
     references: [sessions.id],
+  }),
+}));
+
+export const cartsRelations = relations(carts, ({ one, many }) => ({
+  user: one(users, {
+    fields: [carts.userId],
+    references: [users.id],
+  }),
+  session: one(sessions, {
+    fields: [carts.sessionId],
+    references: [sessions.id],
+  }),
+  items: many(cartItems),
+}));
+
+export const cartItemsRelations = relations(cartItems, ({ one }) => ({
+  cart: one(carts, {
+    fields: [cartItems.cartId],
+    references: [carts.id],
+  }),
+  product: one(products, {
+    fields: [cartItems.productId],
+    references: [products.id],
   }),
 }));

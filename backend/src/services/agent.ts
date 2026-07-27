@@ -5,6 +5,7 @@
  * - Discovery: search, product details, variants, preferences
  * - Try-on: suggest, initiate, status (split for confirmation)
  * - Payment: prepare, execute, status (split for confirmation)
+ * - Cart: add, view, update, remove items
  * 
  * Uses OpenAI SDK with OpenRouter or direct OpenAI API
  * 
@@ -15,7 +16,7 @@
  */
 
 import OpenAI from "openai";
-import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies } from "../db/index.js";
+import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies, carts, cartItems } from "../db/index.js";
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { searchCatalog } from "./catalog-query.js";
 import { vectorSearchProducts } from "./vector.js";
@@ -30,6 +31,7 @@ import {
   safeValidateProducts,
   formatSSEMessage,
   type StreamingEvent,
+  type ChatMessage,
 } from "./validation.js";
 
 // Re-export validated types
@@ -394,8 +396,8 @@ async function executePravaCheckoutTool(args: { purchaseIntentId: string; confir
 }
 
 /**
- * Get purchase status
- */
+  * Get purchase status
+  */
 async function getPurchaseStatusTool(args: { purchaseIntentId: string }) {
   // In production, query actual order/payment status
   // For now, return placeholder
@@ -405,6 +407,158 @@ async function getPurchaseStatusTool(args: { purchaseIntentId: string }) {
     status: "pending",
     message: "Payment status pending. Please check back shortly.",
   };
+}
+
+// ============================================================================
+// Cart Tools
+// ============================================================================
+
+/**
+ * Resolve or create a cart for a user (authenticated or guest)
+ */
+async function resolveCart(userId: string | undefined, sessionId: string | undefined) {
+  if (userId) {
+    let [cart] = await db.select().from(carts).where(and(eq(carts.userId, userId), eq(carts.status, "active"))).limit(1);
+    if (!cart) {
+      [cart] = await db.insert(carts).values({ userId, sessionId, status: "active" }).returning();
+    }
+    return cart;
+  }
+
+  if (sessionId) {
+    let [cart] = await db.select().from(carts).where(and(eq(carts.sessionId, sessionId), eq(carts.status, "active"))).limit(1);
+    if (!cart) {
+      [cart] = await db.insert(carts).values({ sessionId, status: "active" }).returning();
+    }
+    return cart;
+  }
+
+  return null;
+}
+
+/**
+ * Add a product to the cart
+ */
+async function addToCartTool(args: { productId: string; variantId?: string; quantity?: number; userId?: string; sessionId?: string }) {
+  const cart = await resolveCart(args.userId, args.sessionId);
+  if (!cart) {
+    return { error: "Unable to resolve cart. Please provide userId or sessionId." };
+  }
+
+  const [product] = await db.select().from(products).where(eq(products.id, args.productId)).limit(1);
+  if (!product) {
+    return { error: "Product not found" };
+  }
+
+  // Check if item already in cart
+  const existingItem = await db.select().from(cartItems).where(
+    and(eq(cartItems.cartId, cart.id), eq(cartItems.productId, args.productId))
+  ).limit(1);
+
+  if (existingItem.length > 0) {
+    // Update quantity
+    const updated = await db.update(cartItems)
+      .set({ quantity: existingItem[0].quantity + (args.quantity || 1), updatedAt: new Date() })
+      .where(eq(cartItems.id, existingItem[0].id))
+      .returning();
+    return { success: true, message: `Updated ${product.title} quantity to ${updated[0].quantity}`, cartItemId: updated[0].id };
+  }
+
+  // Add new item
+  const [newItem] = await db.insert(cartItems).values({
+    cartId: cart.id,
+    productId: args.productId,
+    variantId: args.variantId || null,
+    quantity: args.quantity || 1,
+  }).returning();
+
+  return { success: true, message: `Added ${product.title} to cart`, cartItemId: newItem.id };
+}
+
+/**
+ * View the current cart contents
+ */
+async function viewCartTool(args: { userId?: string; sessionId?: string }) {
+  const cart = await resolveCart(args.userId, args.sessionId);
+  if (!cart) {
+    return { items: [], totalItems: 0, totalPrice: 0 };
+  }
+
+  const items = await db.select().from(cartItems).where(eq(cartItems.cartId, cart.id));
+
+  const cartItemsWithProducts = await Promise.all(
+    items.map(async (item) => {
+      const [product] = await db.select().from(products).where(eq(products.id, item.productId)).limit(1);
+      return {
+        cartItemId: item.id,
+        productId: item.productId,
+        title: product?.title || "Unknown Product",
+        images: product?.images || [],
+        minPrice: product?.minPrice ? parseFloat(String(product.minPrice)) : null,
+        variantId: item.variantId,
+        quantity: item.quantity,
+      };
+    })
+  );
+
+  const totalItems = cartItemsWithProducts.reduce((sum, i) => sum + i.quantity, 0);
+  const totalPrice = cartItemsWithProducts.reduce((sum, i) => {
+    const price = i.minPrice || 0;
+    return sum + price * i.quantity;
+  }, 0);
+
+  return { items: cartItemsWithProducts, totalItems, totalPrice: Math.round(totalPrice * 100) / 100 };
+}
+
+/**
+ * Update the quantity of a cart item
+ */
+async function updateCartItemTool(args: { cartItemId: string; quantity: number; userId?: string; sessionId?: string }) {
+  const cart = await resolveCart(args.userId, args.sessionId);
+  if (!cart) {
+    return { error: "Unable to resolve cart. Please provide userId or sessionId." };
+  }
+
+  const [item] = await db.select().from(cartItems).where(
+    and(eq(cartItems.id, args.cartItemId), eq(cartItems.cartId, cart.id))
+  ).limit(1);
+
+  if (!item) {
+    return { error: "Cart item not found" };
+  }
+
+  if (args.quantity <= 0) {
+    await db.delete(cartItems).where(eq(cartItems.id, args.cartItemId));
+    return { success: true, message: "Item removed from cart" };
+  }
+
+  const [updated] = await db.update(cartItems)
+    .set({ quantity: args.quantity, updatedAt: new Date() })
+    .where(eq(cartItems.id, args.cartItemId))
+    .returning();
+
+  return { success: true, message: `Updated quantity to ${updated.quantity}`, cartItemId: updated.id };
+}
+
+/**
+ * Remove an item from the cart
+ */
+async function removeFromCartTool(args: { cartItemId: string; userId?: string; sessionId?: string }) {
+  const cart = await resolveCart(args.userId, args.sessionId);
+  if (!cart) {
+    return { error: "Unable to resolve cart. Please provide userId or sessionId." };
+  }
+
+  const [item] = await db.select().from(cartItems).where(
+    and(eq(cartItems.id, args.cartItemId), eq(cartItems.cartId, cart.id))
+  ).limit(1);
+
+  if (!item) {
+    return { error: "Cart item not found" };
+  }
+
+  await db.delete(cartItems).where(eq(cartItems.id, args.cartItemId));
+  return { success: true, message: "Item removed from cart" };
 }
 
 // ============================================================================
@@ -562,6 +716,63 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
     },
     handler: getPurchaseStatusTool,
   },
+  {
+    name: "add_to_cart",
+    description: "Add a product to the shopping cart. Use when the user wants to add an item to their cart.",
+    parameters: {
+      type: "object",
+      properties: {
+        productId: { type: "string", description: "The product ID to add" },
+        variantId: { type: "string", description: "Optional variant ID (size/color)" },
+        quantity: { type: "number", description: "Quantity to add (default 1)" },
+        userId: { type: "string", description: "The user ID (for authenticated users)" },
+        sessionId: { type: "string", description: "The session ID (for guest users)" },
+      },
+      required: ["productId"],
+    },
+    handler: addToCartTool,
+  },
+  {
+    name: "view_cart",
+    description: "View the current contents of the shopping cart.",
+    parameters: {
+      type: "object",
+      properties: {
+        userId: { type: "string", description: "The user ID (for authenticated users)" },
+        sessionId: { type: "string", description: "The session ID (for guest users)" },
+      },
+    },
+    handler: viewCartTool,
+  },
+  {
+    name: "update_cart_item",
+    description: "Update the quantity of an item in the cart. Use quantity=0 to remove an item.",
+    parameters: {
+      type: "object",
+      properties: {
+        cartItemId: { type: "string", description: "The cart item ID to update" },
+        quantity: { type: "number", description: "New quantity (0 to remove)" },
+        userId: { type: "string", description: "The user ID (for authenticated users)" },
+        sessionId: { type: "string", description: "The session ID (for guest users)" },
+      },
+      required: ["cartItemId", "quantity"],
+    },
+    handler: updateCartItemTool,
+  },
+  {
+    name: "remove_from_cart",
+    description: "Remove an item from the shopping cart.",
+    parameters: {
+      type: "object",
+      properties: {
+        cartItemId: { type: "string", description: "The cart item ID to remove" },
+        userId: { type: "string", description: "The user ID (for authenticated users)" },
+        sessionId: { type: "string", description: "The session ID (for guest users)" },
+      },
+      required: ["cartItemId"],
+    },
+    handler: removeFromCartTool,
+  },
 ];
 
 // ============================================================================
@@ -593,6 +804,14 @@ WORKFLOW FOR PURCHASE:
 2. Wait for user to confirm
 3. Use execute_prava_checkout with the confirmation token
 4. Use get_purchase_status to verify success
+
+WORKFLOW FOR CART:
+1. Use add_to_cart to add products to the cart
+2. Use view_cart to show the user what's in their cart
+3. Use update_cart_item to change quantities
+4. Use remove_from_cart to remove items
+5. After cart changes, use view_cart to show the updated cart
+6. The user can proceed to checkout from the cart view
 
 Keep responses conversational but concise. Use tools efficiently - don't make unnecessary calls.`;
 
@@ -629,8 +848,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResponse>
     }
   };
 
-  // Run streaming version
-  await runAgentStream({ ...options, onEvent: collectEvent });
+  // Run streaming version and capture full message history
+  const messages = await runAgentStream({ ...options, onEvent: collectEvent });
 
   // Validate and return
   return {
@@ -638,6 +857,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResponse>
     uiPayload: safeValidateUIPayload(uiPayload),
     actions: actions.slice(0, 10), // Limit actions
     conversationId: options.sessionId,
+    messages,
   };
 }
 
@@ -649,7 +869,7 @@ export interface RunAgentStreamOptions extends RunAgentOptions {
  * Run the agent with streaming support
  * Sends events to the frontend via the callback
  */
-export async function runAgentStream(options: RunAgentStreamOptions): Promise<void> {
+export async function runAgentStream(options: RunAgentStreamOptions): Promise<any[]> {
   const { sessionId, userId, message, conversationHistory = [], shoppingState, onEvent } = options;
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -730,7 +950,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
           });
 
           // Inject userId where needed
-          if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "prepare_purchase", "execute_prava_checkout"].includes(toolName)) {
+          if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "prepare_purchase", "execute_prava_checkout", "add_to_cart", "view_cart", "update_cart_item", "remove_from_cart"].includes(toolName)) {
             args.userId = userId;
           }
 
@@ -831,15 +1051,18 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
     }
   }
 
-  // Send final event with complete response
+   // Send final event with complete response
   onEvent({
     event: "done",
     data: {
       reply: assistantMessage || "I'm not sure how to help with that.",
       uiPayload: safeValidateUIPayload(uiPayload),
       actions: actions.slice(0, 10),
+      messages: messages as any,
     },
   });
+
+  return messages;
 }
 
 // ============================================================================

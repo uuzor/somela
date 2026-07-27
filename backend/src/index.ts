@@ -8,6 +8,7 @@ import { tryonRouter } from "./routes/tryon.js";
 import { preferencesRouter } from "./routes/preferences.js";
 import { visualSearchRouter } from "./routes/visual-search.js";
 import { sessionsRouter } from "./routes/sessions.js";
+import { cartRouter } from "./routes/cart.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,6 +18,11 @@ app.use(cors());
 
 // Raw body for webhook signature verification (before JSON parsing)
 app.use("/api/tryon/webhook", express.raw({ type: "application/json", limit: "10mb" }), (req, _res, next) => {
+  (req as any).rawBody = (req as any).body?.toString() || "";
+  next();
+});
+
+app.use("/api/visual-search/webhook", express.raw({ type: "application/json", limit: "10mb" }), (req, _res, next) => {
   (req as any).rawBody = (req as any).body?.toString() || "";
   next();
 });
@@ -37,6 +43,7 @@ app.use("/api/tryon", tryonRouter);
 app.use("/api/preferences", preferencesRouter);
 app.use("/api/visual-search", visualSearchRouter);
 app.use("/api/sessions", sessionsRouter);
+app.use("/api/cart", cartRouter);
 
 // Error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

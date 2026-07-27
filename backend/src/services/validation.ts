@@ -141,6 +141,26 @@ export const UIActionSchema = z.object({
 export type UIAction = z.infer<typeof UIActionSchema>;
 
 // ============================================================================
+// Chat Message Validation (OpenAI Message Format)
+// ============================================================================
+
+export const ChatMessageSchema = z.object({
+  role: z.enum(["user", "assistant", "system", "tool"]),
+  content: z.string().optional(),
+  tool_calls: z.array(z.object({
+    id: z.string(),
+    type: z.literal("function"),
+    function: z.object({
+      name: z.string(),
+      arguments: z.string(),
+    }),
+  })).optional(),
+  tool_call_id: z.string().optional(),
+});
+
+export type ChatMessage = z.infer<typeof ChatMessageSchema>;
+
+// ============================================================================
 // Agent Response Validation
 // ============================================================================
 
@@ -149,6 +169,7 @@ export const AgentResponseSchema = z.object({
   uiPayload: UIPayloadSchema,
   actions: z.array(UIActionSchema).default([]),
   conversationId: z.string(),
+  messages: z.array(ChatMessageSchema),
   updatedState: z.record(z.unknown()).optional(),
 });
 
@@ -344,6 +365,7 @@ export const StreamingEventSchema = z.discriminatedUnion("event", [
       reply: z.string(),
       uiPayload: UIPayloadSchema,
       actions: z.array(UIActionSchema),
+      messages: z.array(ChatMessageSchema),
     }),
   }),
   z.object({

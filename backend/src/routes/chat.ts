@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, conversations, products, userPreferences, sessions } from "../db/index.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { ChatRequestSchema } from "../types/api.js";
 import { strictRateLimit } from "../middleware/rateLimit.js";
 import { 
@@ -76,12 +76,8 @@ chatRouter.post("/", async (req, res) => {
       shoppingState,
     });
     
-    // Save conversation to DB
-    const newHistory: AgentMessage[] = [
-      ...conversationHistory,
-      { role: "user", content: message },
-      { role: "assistant", content: result.chatReply },
-    ];
+    // Save conversation to DB using full message history from agent
+    const newHistory = result.messages || [];
     
     if (conversation) {
       await db.update(conversations)
@@ -203,7 +199,7 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
     };
     
     // Run the agent with streaming
-    await runAgentStream({
+    const messages = await runAgentStream({
       sessionId,
       userId,
       message,
@@ -213,11 +209,7 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
     });
     
     // Save conversation to DB after streaming completes
-    const newHistory: AgentMessage[] = [
-      ...conversationHistory,
-      { role: "user", content: message },
-      { role: "assistant", content: finalReply },
-    ];
+    const newHistory = messages || [];
     
     if (conversation) {
       await db.update(conversations)
@@ -280,5 +272,95 @@ chatRouter.get("/history", async (req, res) => {
   } catch (error) {
     console.error("Chat history error:", error);
     res.status(500).json({ error: "Failed to fetch chat history" });
+  }
+});
+
+/**
+ * GET /api/chat/sessions - List all conversation sessions for a user
+ */
+chatRouter.get("/sessions", async (req, res) => {
+  try {
+    const userId = req.headers["x-user-id"] as string;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Missing x-user-id header" });
+    }
+
+    const results = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.userId, userId))
+      .orderBy(conversations.updatedAt);
+
+    const sessions = results.map((c) => ({
+      id: c.id,
+      sessionId: c.sessionId,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      messageCount: (c.messages || []).length,
+      lastMessage: (c.messages?.length ?? 0) > 0 ? c.messages[c.messages.length - 1].content || "" : "",
+    }));
+
+    res.json({ sessions });
+  } catch (error) {
+    console.error("Chat sessions list error:", error);
+    res.status(500).json({ error: "Failed to list chat sessions" });
+  }
+});
+
+/**
+ * GET /api/chat/sessions/:id - Get full conversation including all messages
+ */
+chatRouter.get("/sessions/:id", async (req, res) => {
+  try {
+    const userId = req.headers["x-user-id"] as string;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Missing x-user-id header" });
+    }
+
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(and(eq(conversations.id, req.params.id), eq(conversations.userId, userId)))
+      .limit(1);
+
+    if (!conversation) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    res.json({ conversation });
+  } catch (error) {
+    console.error("Chat session detail error:", error);
+    res.status(500).json({ error: "Failed to fetch chat session" });
+  }
+});
+
+/**
+ * DELETE /api/chat/sessions/:id - Delete a conversation session
+ */
+chatRouter.delete("/sessions/:id", async (req, res) => {
+  try {
+    const userId = req.headers["x-user-id"] as string;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Missing x-user-id header" });
+    }
+
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(and(eq(conversations.id, req.params.id), eq(conversations.userId, userId)))
+      .limit(1);
+
+    if (!conversation) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    await db.delete(conversations).where(eq(conversations.id, req.params.id));
+    res.status(204).send();
+  } catch (error) {
+    console.error("Chat session delete error:", error);
+    res.status(500).json({ error: "Failed to delete chat session" });
   }
 });
