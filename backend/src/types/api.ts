@@ -35,6 +35,7 @@ export type SemanticSearch = z.infer<typeof SemanticSearchSchema>;
 export const ChatMessageSchema = z.object({
   role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
+  imageUrl: z.string().url().optional(), // Optional image attachment
 });
 
 export const ChatRequestSchema = z.object({
@@ -42,6 +43,7 @@ export const ChatRequestSchema = z.object({
   message: z.string().min(1).max(2000),
   userId: z.string().optional(), // Optional user ID for authenticated users
   history: z.array(ChatMessageSchema).optional(),
+  imageUrl: z.string().url().optional(), // Image URL for visual search
 });
 
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;

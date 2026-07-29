@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "alibabacloud-find-skills": {
+      "version": "0.0.10",
+      "installedAt": 1785261355837,
+      "ownerHandle": "sdk-team"
+    },
+    "alibabacloud-ecs-code-deploy": {
+      "version": "1.0.1",
+      "installedAt": 1785261420326,
+      "ownerHandle": "sdk-team"
+    },
+    "alibabacloud-esa-pages-deploy": {
+      "version": "0.0.2",
+      "installedAt": 1785261430072,
+      "ownerHandle": "sdk-team"
+    }
+  }
+}

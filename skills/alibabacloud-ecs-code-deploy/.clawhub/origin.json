@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "registry": "https://clawhub.ai",
+  "slug": "alibabacloud-ecs-code-deploy",
+  "ownerHandle": "sdk-team",
+  "installedVersion": "1.0.1",
+  "installedAt": 1785261420326,
+  "fingerprint": "57bc025ace2794b2461778cc406581ecee44d44b35c203095913e790d8e4d0b3"
+}

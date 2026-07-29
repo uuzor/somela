@@ -9,6 +9,7 @@ import { preferencesRouter } from "./routes/preferences.js";
 import { visualSearchRouter } from "./routes/visual-search.js";
 import { sessionsRouter } from "./routes/sessions.js";
 import { cartRouter } from "./routes/cart.js";
+import { uploadRouter } from "./routes/upload.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,6 +25,12 @@ app.use("/api/tryon/webhook", express.raw({ type: "application/json", limit: "10
 
 app.use("/api/visual-search/webhook", express.raw({ type: "application/json", limit: "10mb" }), (req, _res, next) => {
   (req as any).rawBody = (req as any).body?.toString() || "";
+  next();
+});
+
+// Raw body for file uploads (before JSON parsing)
+app.use("/api/upload", express.raw({ type: "multipart/form-data", limit: "10mb" }), (req, _res, next) => {
+  (req as any).rawBody = req.body;
   next();
 });
 
@@ -44,6 +51,7 @@ app.use("/api/preferences", preferencesRouter);
 app.use("/api/visual-search", visualSearchRouter);
 app.use("/api/sessions", sessionsRouter);
 app.use("/api/cart", cartRouter);
+app.use("/api", uploadRouter); // Serves /api/upload/file, /api/upload/url, /api/uploads/:file
 
 // Error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

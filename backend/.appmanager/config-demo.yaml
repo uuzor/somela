@@ -1,0 +1,60 @@
+# 元数据配置
+metadata:
+  name: my-app                      # 应用/Agent 名称 (必填)
+  type: app
+  groupName: default-cn-beijing     # 分组名称，格式：default-{regionId}，如 default-cn-hangzhou (必填)
+  regionId: cn-beijing              # 部署地域 (必填)
+  description: ""                   # 描述 (可选)
+
+# 基础配置
+common:
+  # 环境变量配置（可选）
+  # environment:
+  #   URL: "your-url"
+
+  # OSS 上传配置（可选）
+  # 说明：不配置时，deploy 命令会自动创建 OSS 存储桶和路径
+  # 如需使用已有 OSS，请取消注释并填写：
+  # upload:
+  #   oss:
+  #     regionId: cn-beijing       # OSS 区域，建议与部署区域一致
+  #     bucketName: my-bucket      # 已存在的存储桶名称 (必填)
+  #     objectPath: agents/app/    # 对象存储路径（可选，默认: agents/项目名称/）
+
+  # 部署配置
+  deployment:
+    # 已有 ECS
+    # instanceId: i-xxx              # 已有阿里云 ECS 实例 ID
+
+    # 新建 ECS（如需自定义更复杂的配置请访问控制台）
+    # https://ecs.console.aliyun.com/server/region/cn-beijing
+    ecsInstanceType: ecs.u1-c1m2.large  # ECS 实例规格，默认 2 核 4G
+    systemDiskSize: 40                    # 系统盘大小 (GB)
+    internetMaxBandwidthOut: 5           # 公网带宽，设置为 0 时不可公网访问
+    port: 80                           # 应用监听端口（仅 App 项目）
+
+    # 脚本命令类型（可选，默认 RunShellScript）
+    # 合法值：RunShellScript（Linux/macOS shell）| RunBatScript（Windows 批处理）| RunPowerShellScript（PowerShell）
+    # commandType: RunShellScript
+
+  # AI 脚本生成器配置（可选）
+  # 启用后，AI 将自动分析项目结构并生成启动/终止脚本
+  script_generator:
+    enabled: true              # 是否启用 AI 脚本生成（默认: true）
+    model: "qwen3.6-plus"         # 使用的 AI 模型
+    apiKey: ""                 # AI 服务 API 密钥（与 agent.model.apiKey 相同）
+
+  # 自定义启动/终止脚本（可选）
+  # 优先级：common.scripts > common.script_generator（AI 生成）> 默认规则生成
+  # scripts:
+  #   start: |
+  #     # 自定义启动脚本示例（Linux）
+  #     cd /root
+  #     nohup python3 main.py >> /root/app.log 2>&1 &
+  #     echo $! > /root/app.pid
+  #   stop: |
+  #     # 自定义终止脚本示例（Linux）
+  #     if [ -f /root/app.pid ]; then
+  #       kill $(cat /root/app.pid) 2>/dev/null || true
+  #       rm -f /root/app.pid
+  #     fi

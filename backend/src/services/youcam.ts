@@ -64,7 +64,7 @@ export interface PhotoEnhanceParams {
 
 /**
  * Upload an image to YouCam's File API.
- * Step 1: GET /s2s/v2.0/file/upload-url to get upload_url + file_id
+ * Step 1: POST /s2s/v2.0/file/upload-url to get upload_url + file_id
  * Step 2: PUT the image bytes to upload_url
  */
 export async function uploadImage(
@@ -77,14 +77,16 @@ export async function uploadImage(
     throw new Error(`Invalid image URL: ${imageUrl}`);
   }
 
-  // Step 1: Get upload URL from YouCam File API
+  // Step 1: Get upload URL from YouCam File API (POST method)
   const uploadUrlResponse = await fetch(
     `${YOUCAM_BASE_URL}/s2s/v2.0/file/upload-url`,
     {
-      method: "GET",
+      method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({ image_url: imageUrl }), // Send the image URL directly
     }
   );
 

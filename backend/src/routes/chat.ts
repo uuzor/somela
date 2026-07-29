@@ -34,7 +34,7 @@ chatRouter.post("/", async (req, res) => {
     }
     
     // Get or create conversation
-    const { sessionId, message } = input;
+    const { sessionId, message, imageUrl } = input;
     const userId = input.userId || sessionId;
     
     // Load conversation history from DB
@@ -67,11 +67,12 @@ chatRouter.post("/", async (req, res) => {
       visibleProductIds: [],
     };
     
-    // Run the agent
+    // Run the agent (pass imageUrl for visual search)
     const result = await runAgent({
       sessionId,
       userId,
       message,
+      imageUrl,
       conversationHistory,
       shoppingState,
     });
@@ -130,7 +131,7 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
     }
     
     // Get or create conversation
-    const { sessionId, message } = input;
+    const { sessionId, message, imageUrl } = input;
     const userId = input.userId || sessionId;
     
     // Load conversation history from DB
@@ -175,7 +176,7 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
     // Send initial connection event
     res.write(formatSSEMessage({
       event: "connected",
-      data: { sessionId, conversationId: sessionId },
+      data: { sessionId, conversationId: sessionId, hasImage: !!imageUrl },
     }));
     
     // Collect final state
@@ -198,11 +199,12 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
       }
     };
     
-    // Run the agent with streaming
+    // Run the agent with streaming (pass imageUrl for visual search)
     const messages = await runAgentStream({
       sessionId,
       userId,
       message,
+      imageUrl,
       conversationHistory,
       shoppingState,
       onEvent: sendEvent,

@@ -1,80 +1,48 @@
-# Stop Embeddings & Test Visual Search
+# Run Somela on Different Port
 
 ## 1. OBJECTIVE
-Stop the ongoing embedding process (1000 embeddings is sufficient for testing) and validate the visual search API functionality to ensure the full pipeline works before continuing with other features.
+Configure Somela to run on port 12000 so existing products on port 8080 remain accessible. Push changes to GitHub and create a pull request.
 
 ## 2. CONTEXT SUMMARY
 
-### Current State
-- **Embedding process:** Running in background via `nohup`, hitting Voyage AI rate limits (429 errors), only ~10 products processed before hitting rate limits
-- **Visual search API:** Implemented in `backend/src/routes/visual-search.ts` - accepts text or imageUrl queries, returns taskId for polling
-- **Backend server:** Has port conflict issues (EADDRINUSE on 3000), needs restart
-- **Database:** Has `product_embeddings` table with existing embeddings (up to ~15 embedded before rate limits)
-
-### Key Components
-- `backend/src/routes/visual-search.ts` - Visual search endpoint
-- `backend/scripts/embeddings.ts` - Embedding generation script
-- `backend/src/db/schema.ts` - Database schema with `product_embeddings` table
+- **Existing products:** 2 products running on http://8.222.176.62:8080/ that must remain accessible
+- **Backend:** Express server defaults to port 3000, configurable via `PORT` env var
+- **Frontend:** React app with Vite dev server, proxies `/api` to `http://localhost:3000`
+- **Remote:** GitHub repo at github.com/uuzor/somela
 
 ## 3. APPROACH OVERVIEW
 
-1. **Kill the embedding process** - Stop the background nohup embedding script
-2. **Kill and restart the backend server** - Fix port conflict, ensure clean state
-3. **Test visual search API** - Verify the visual search endpoint works with current embeddings
-4. **Continue with other work** - Based on priorities (likely frontend or other backend features)
+1. Add `PORT=12000` to backend `.env` file
+2. Update frontend `vite.config.js` proxy to point to port 12000
+3. Commit changes to a new branch
+4. Push to GitHub and create pull request
 
 ## 4. IMPLEMENTATION STEPS
 
-### Step 1: Kill Embedding Process
-- **Goal:** Stop the background embedding script that's hitting rate limits
-- **Method:** Find and kill any running embedding processes (nohup/tsx/node)
-- **Reference:** `backend/scripts/embeddings.ts`, `backend/embeddings.log`
+### Step 1: Add PORT=12000 to backend/.env
+- **Goal:** Configure backend to listen on port 12000
+- **File:** `/workspace/project/somela/backend/.env`
+- **Change:** Add at top of file:
+  ```
+  # Server port (uses 12000 to avoid conflict with existing products on 8080)
+  PORT=12000
+  ```
 
-### Step 2: Kill and Restart Backend Server
-- **Goal:** Fix port conflict and ensure backend is running cleanly
-- **Method:** Kill existing node process on port 3000, restart backend with tsx
-- **Reference:** `backend/src/index.ts`
+### Step 2: Update Frontend Vite Config
+- **Goal:** Point frontend proxy to new backend port
+- **File:** `/workspace/project/somela/frontend/vite.config.js`
+- **Change:** Update proxy target from `http://localhost:3000` to `http://localhost:12000`
 
-### Step 3: Check Current Embedding Count
-- **Goal:** Verify how many products are currently embedded
-- **Method:** Query the database to count rows in `product_embeddings` table
-- **Reference:** `backend/src/db/schema.ts`
+### Step 3: Commit and Push to GitHub
+- **Goal:** Push changes to a new branch
+- **Branch name:** `feature/run-on-port-12000`
+- **Commit message:** "Configure backend to run on port 12000"
 
-### Step 4: Fix Visual Search to Support Text AND Image Together
-- **Goal:** Ensure visual search accepts BOTH text and image (multimodal query)
-- **Method:** Update `processVisualSearch` in `visual-search.ts` to combine embeddings when both are provided, rather than using only one
-- **Reference:** `backend/src/routes/visual-search.ts`
-
-### Step 5: Test Visual Search API (Text, Image, and Combined)
-- **Goal:** Validate visual search works with text-only, image-only, and text+image queries
-- **Method:** 
-  - Test 1: POST with `{"text": "denim jacket"}` only
-  - Test 2: POST with `{"imageUrl": "..."}` only (if available)
-  - Test 3: POST with `{"text": "something like this", "imageUrl": "..."}` combined
-- **Reference:** `backend/src/routes/visual-search.ts`
-
-### Step 6: Continue with Other Work (TBD)
-- **Goal:** Based on priority, continue with remaining features
-- **Method:** Options include:
-  - Frontend integration for visual search UI
-  - Try-on API implementation  
-  - Chat/discovery agent wiring
-  - Other backend features
-- **Reference:** TBD based on priority decision
+### Step 4: Create Pull Request
+- **Goal:** Create PR for review
+- **Target:** Merge into `main` branch
 
 ## 5. TESTING AND VALIDATION
 
-### Visual Search API Test
-1. Start backend server successfully (no port conflict)
-2. **Test text-only query:** POST `{"text": "casual summer dress"}` → poll for results
-3. **Test image-only query:** POST `{"imageUrl": "https://..."}` → poll for results  
-4. **Test combined query:** POST `{"text": "something like this", "imageUrl": "https://..."}` → poll for results
-5. Verify results contain product matches with similarity scores for all query types
-
-### Success Criteria
-- Backend server runs cleanly on port 3000
-- Visual search endpoint returns valid taskId for all query types
-- Text-only query returns results
-- Image-only query returns results
-- Combined text+image query returns results (with both modalities combined)
-- No rate limit errors in logs
+- Backend health check: `curl http://localhost:12000/health`
+- Existing products on port 8080 remain accessible

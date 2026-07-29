@@ -1,0 +1,15 @@
+common:
+  deployment:
+    instanceId: i-t4n8gt40krtdeqh894ke
+    port: 3000
+  scripts:
+    start: curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && yum install
+      -y nodejs && cd /root/project && npm install && npm run build && PORT=3000 npm
+      start > /root/app.log 2>&1 &
+    stop: pkill -f "node.*dist/index.js" || true
+metadata:
+  description: ''
+  groupName: default-ap-southeast-1
+  name: somela-backend
+  regionId: ap-southeast-1
+  type: app

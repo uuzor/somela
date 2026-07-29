@@ -783,6 +783,9 @@ const SYSTEM_PROMPT = `You are a helpful clothing-shopping agent for Somela.
 
 Help users discover, compare, try on and purchase clothes from our curated collection.
 
+VISUAL SEARCH:
+When users upload an image, they want to find visually similar clothing items. The system has already performed visual search and returned matching products. Present these results helpfully, describing how each item relates to what they uploaded.
+
 CRITICAL RULES:
 1. Use search_catalog instead of inventing products.
 2. Respect the user's saved size, style, colour and budget from get_user_preferences.
@@ -793,6 +796,9 @@ CRITICAL RULES:
 7. NEVER claim that a payment succeeded until get_purchase_status returns a successful result.
 8. Do NOT let the model calculate payment totals - use prepare_purchase which does this properly.
 9. Do NOT let the model decide whether confirmation happened - your backend verifies the confirmation token.
+
+WORKFLOW FOR VISUAL SEARCH:
+When the user's message includes "[User uploaded an image]", visually similar products have already been searched and returned. Describe these results, highlighting key similarities in style, color, or category. Do NOT re-search unless the user asks to refine.
 
 WORKFLOW FOR TRY-ON:
 1. Use suggest_try_on to show a product card to the user
@@ -823,6 +829,7 @@ export interface RunAgentOptions {
   sessionId: string;
   userId: string;
   message: string;
+  imageUrl?: string; // Optional image for visual search
   conversationHistory?: AgentMessage[];
   shoppingState?: ShoppingState;
 }
@@ -870,7 +877,7 @@ export interface RunAgentStreamOptions extends RunAgentOptions {
  * Sends events to the frontend via the callback
  */
 export async function runAgentStream(options: RunAgentStreamOptions): Promise<any[]> {
-  const { sessionId, userId, message, conversationHistory = [], shoppingState, onEvent } = options;
+  const { sessionId, userId, message, imageUrl, conversationHistory = [], shoppingState, onEvent } = options;
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: SYSTEM_PROMPT },
@@ -898,8 +905,40 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
     }
   }
 
-  // Add current message
-  messages.push({ role: "user", content: message });
+  // Build user message content
+  let userContent = message;
+  if (imageUrl) {
+    userContent = `${message}\n\n[User uploaded an image for visual search: ${imageUrl}]`;
+  }
+  messages.push({ role: "user", content: userContent });
+
+  // If imageUrl is provided, perform visual search first and include results
+  let visualSearchResults = null;
+  if (imageUrl && isVectorSearchAvailable()) {
+    try {
+      const { vectorSearchProducts } = await import("./vector.js");
+      visualSearchResults = await vectorSearchProducts({ imageUrl }, 12);
+      
+      // Send visual search results as an event
+      onEvent({
+        event: "ui_payload",
+        data: {
+          type: "replace_catalog",
+          products: visualSearchResults.map((r) => ({
+            productId: r.productId,
+            title: r.title,
+            images: r.images || [],
+            minPrice: r.minPrice,
+            maxPrice: r.maxPrice,
+            category: r.category,
+            url: r.url,
+          })),
+        },
+      });
+    } catch (error) {
+      console.error("Visual search failed:", error);
+    }
+  }
 
   // Build tool definitions
   const toolDefs: OpenAI.Chat.ChatCompletionTool[] = TOOLS.map(t => ({
@@ -915,6 +954,22 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
   let toolResults: Array<{ role: "tool"; tool_call_id: string; content: string }> = [];
   let actions: UIAction[] = [];
   let uiPayload: UIPayload = DEFAULT_UI_PAYLOAD;
+
+  // If we already have visual search results, set them as the initial uiPayload
+  if (visualSearchResults && visualSearchResults.length > 0) {
+    uiPayload = {
+      type: "replace_catalog",
+      products: visualSearchResults.map((r) => ({
+        productId: r.productId,
+        title: r.title,
+        images: r.images || [],
+        minPrice: r.minPrice,
+        maxPrice: r.maxPrice,
+        category: r.category,
+        url: r.url,
+      })),
+    };
+  }
 
   // Agent loop (max 8 iterations)
   for (let turn = 0; turn < 8; turn++) {

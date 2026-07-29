@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db, tryonTasks, userSelfies, products } from "../db/index.js";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
 import { TryonRequestSchema } from "../types/api.js";
 import { tryonRateLimit } from "../middleware/rateLimit.js";
 import {
@@ -12,16 +13,236 @@ import {
   verifyWebhookSignature,
   isYouCamConfigured,
   processSelfie,
+  pollTask,
   type YouCamWebhookPayload,
 } from "../services/youcam.js";
+import { uploadToStorage, generateStoragePath, downloadFromUrl } from "../services/supabase.js";
 
 export const tryonRouter = Router();
+
+const BUCKET_NAME = "images";
 
 // Apply rate limiting
 tryonRouter.post("/", tryonRateLimit);
 tryonRouter.post("/selfie", tryonRateLimit);
+tryonRouter.post("/multi", tryonRateLimit);
 
-// POST /api/tryon - Initiate try-on
+// Helper: Detect garment category from product
+function detectGarmentCategory(product: any): "upper_body" | "lower_body" | "full_body" {
+  const category = (product.category || "").toLowerCase();
+  const title = (product.title || "").toLowerCase();
+  const tags = ((product as any).tags || []).join(" ").toLowerCase();
+  const combined = `${category} ${title} ${tags}`;
+  
+  if (/denim|pant|jean|trouser|skirt|short|bottom|leg/.test(combined)) {
+    return "lower_body";
+  }
+  if (/top|shirt|blouse|sweater|hoodie|jacket|coat|dress|full/.test(combined)) {
+    return "upper_body";
+  }
+  return "full_body";
+}
+
+// Helper: Download YouCam result and upload to Supabase
+async function saveResultToSupabase(youcamUrl: string, sessionId: string, step: number): Promise<string> {
+  try {
+    const { buffer, contentType } = await downloadFromUrl(youcamUrl);
+    const path = generateStoragePath(`tryon/${sessionId}`, "jpg");
+    const publicUrl = await uploadToStorage(BUCKET_NAME, path, buffer, contentType);
+    console.log(`  Saved step ${step} result to Supabase: ${publicUrl}`);
+    return publicUrl;
+  } catch (error) {
+    console.error(`  Failed to save to Supabase, returning original URL: ${error}`);
+    return youcamUrl; // Fallback to original URL
+  }
+}
+
+// POST /api/tryon/multi - Multi-step try-on for multiple products
+// Now saves results to Supabase Storage
+tryonRouter.post("/multi", async (req, res) => {
+  try {
+    const input = z.object({
+      productIds: z.array(z.string()).min(1),
+      selfieId: z.string().optional(),
+    }).parse(req.body);
+    
+    const userId = req.headers["x-user-id"] as string;
+    if (!userId) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+    
+    if (!isYouCamConfigured()) {
+      return res.status(503).json({
+        error: "Try-on not available",
+        reason: "YOUCAM_API_KEY not configured",
+      });
+    }
+    
+    // Get selfie
+    let selfie;
+    if (input.selfieId) {
+      [selfie] = await db
+        .select()
+        .from(userSelfies)
+        .where(eq(userSelfies.id, input.selfieId))
+        .limit(1);
+    } else {
+      [selfie] = await db
+        .select()
+        .from(userSelfies)
+        .where(eq(userSelfies.userId, userId))
+        .limit(1);
+    }
+    
+    if (!selfie) {
+      return res.status(400).json({
+        error: "No selfie on file",
+        message: "Please upload a selfie first",
+      });
+    }
+    
+    // Get all products
+    const productRecords = await Promise.all(
+      input.productIds.map(id => 
+        db.select().from(products).where(eq(products.id, id)).limit(1)
+      )
+    );
+    
+    const validProducts = productRecords
+      .flat()
+      .filter(p => p && (p.images?.[0] || (p as any).processedImages?.[0]));
+    
+    if (validProducts.length === 0) {
+      return res.status(400).json({ error: "No valid products found" });
+    }
+    
+    // Generate session ID
+    const sessionId = `tryon_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    
+    // Create parent task
+    const [parentTask] = await db.insert(tryonTasks).values({
+      userId,
+      productIds: input.productIds,
+      selfieId: selfie.id,
+      externalTaskId: sessionId,
+      status: "processing",
+    }).returning();
+    
+    // Start async multi-step process
+    const apiKey = getYouCamApiKey();
+    let currentSourceImage = selfie.processedImageUrl || selfie.imageUrl;
+    const steps = [];
+    
+    console.log(`Starting multi-step try-on session ${sessionId}`);
+    console.log(`Products to try on: ${validProducts.length}`);
+    
+    // Process each product sequentially
+    for (let i = 0; i < validProducts.length; i++) {
+      const product = validProducts[i];
+      const garmentImageUrl = (product as any).processedImages?.[0] || product.images?.[0];
+      const garmentCategory = detectGarmentCategory(product);
+      
+      console.log(`Step ${i + 1}: Trying on ${product.title} (${garmentCategory})`);
+      
+      // Create YouCam task
+      const taskResponse = await createAIClothTask(
+        {
+          src_file_url: currentSourceImage,
+          ref_file_url: garmentImageUrl,
+          garment_category: garmentCategory,
+        },
+        apiKey
+      );
+      
+      // Poll for result
+      const result = await pollTask(taskResponse.task_id, "cloth-v3", apiKey, 60, 3000);
+      
+      if (result && extractResultUrl(result)) {
+        const youcamResultUrl = extractResultUrl(result)!;
+        
+        // Save result to Supabase Storage
+        const stableUrl = await saveResultToSupabase(youcamResultUrl, sessionId, i + 1);
+        
+        // Use stable URL for next step
+        currentSourceImage = stableUrl;
+        
+        steps.push({
+          step: i + 1,
+          productId: product.id,
+          productTitle: product.title,
+          category: garmentCategory,
+          status: "success",
+          resultUrl: stableUrl,
+        });
+        
+        console.log(`Step ${i + 1}: Success!`);
+      } else {
+        const errorMsg = result?.error?.message || "Try-on failed";
+        steps.push({
+          step: i + 1,
+          productId: product.id,
+          productTitle: product.title,
+          category: garmentCategory,
+          status: "error",
+          errorMessage: errorMsg,
+        });
+        
+        console.error(`Step ${i + 1}: Failed - ${errorMsg}`);
+        
+        // Update parent task and return partial results
+        await db
+          .update(tryonTasks)
+          .set({
+            status: "failed",
+            errorMessage: `Failed at step ${i + 1}: ${errorMsg}`,
+            completedAt: new Date(),
+          })
+          .where(eq(tryonTasks.id, parentTask.id));
+        
+        return res.json({
+          sessionId,
+          taskId: parentTask.id,
+          status: "error",
+          currentStep: i + 1,
+          totalSteps: validProducts.length,
+          steps,
+          finalResultUrl: steps.length > 0 ? steps[steps.length - 1].resultUrl : null,
+          errorMessage: errorMsg,
+        });
+      }
+    }
+    
+    // All steps completed successfully
+    await db
+      .update(tryonTasks)
+      .set({
+        status: "completed",
+        resultImageUrl: currentSourceImage, // This is now the Supabase URL
+        completedAt: new Date(),
+      })
+      .where(eq(tryonTasks.id, parentTask.id));
+    
+    console.log(`Multi-step try-on ${sessionId} completed successfully!`);
+    
+    res.json({
+      sessionId,
+      taskId: parentTask.id,
+      status: "success",
+      currentStep: validProducts.length,
+      totalSteps: validProducts.length,
+      steps,
+      finalResultUrl: currentSourceImage, // Supabase URL
+    });
+  } catch (error) {
+    console.error("Multi-step try-on error:", error);
+    res.status(500).json({ 
+      error: "Failed to process multi-step try-on", 
+      details: String(error) 
+    });
+  }
+});
+
+// POST /api/tryon - Initiate try-on (single product)
 tryonRouter.post("/", async (req, res) => {
   try {
     const input = TryonRequestSchema.parse(req.body);
@@ -79,12 +300,15 @@ tryonRouter.post("/", async (req, res) => {
     console.log("Creating AI-Cloth task with:");
     console.log("  Selfie URL:", selfieImageUrl);
     console.log("  Garment URL:", garmentImageUrl);
+    console.log("  Product count:", input.productIds.length);
+    
+    const garmentCategory = detectGarmentCategory(product);
     
     const taskResponse = await createAIClothTask(
       {
         src_file_url: selfieImageUrl,
         ref_file_url: garmentImageUrl,
-        garment_category: "upper_body",
+        garment_category: garmentCategory,
       },
       apiKey
     );
@@ -236,6 +460,36 @@ tryonRouter.post("/selfie", async (req, res) => {
   } catch (error) {
     console.error("Selfie upload error:", error);
     res.status(500).json({ error: "Failed to upload selfie" });
+  }
+});
+
+// GET /api/tryon/selfies - List user selfies
+tryonRouter.get("/selfies", async (req, res) => {
+  try {
+    const userId = req.headers["x-user-id"] as string;
+    if (!userId) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+    
+    const selfies = await db
+      .select()
+      .from(userSelfies)
+      .where(eq(userSelfies.userId, userId))
+      .orderBy(userSelfies.createdAt);
+    
+    res.json({
+      selfies: selfies.map(s => ({
+        id: s.id,
+        imageUrl: s.imageUrl,
+        processedImageUrl: s.processedImageUrl,
+        isDefault: s.isDefault,
+        status: s.processedImageUrl ? "completed" : "processing",
+        createdAt: s.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error("Selfies list error:", error);
+    res.status(500).json({ error: "Failed to list selfies" });
   }
 });
 
