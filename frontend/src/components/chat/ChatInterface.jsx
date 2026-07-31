@@ -7,10 +7,10 @@ import { useCategories } from "@/hooks/useCatalog";
 import { useNavigate } from "react-router-dom";
 
 const suggestions = [
-  { icon: Shirt, label: "Find similar outfits to this", color: "text-teal-600 bg-teal-50" },
-  { icon: ImageIcon, label: "Upload a photo to find outfits", color: "text-pink-600 bg-pink-50" },
-  { icon: User, label: "Give me outfit recommendations", color: "text-purple-600 bg-purple-50" },
-  { icon: Palette, label: "Suggest clothes by style", color: "text-red-600 bg-red-50" },
+  { icon: Shirt, label: "Find similar outfits to this", color: "text-slate-600 bg-slate-50" },
+  { icon: ImageIcon, label: "Upload a photo to find outfits", color: "text-slate-600 bg-slate-50" },
+  { icon: User, label: "Give me outfit recommendations", color: "text-black bg-black-50" },
+  { icon: Palette, label: "Suggest clothes by style", color: "text-slate-600 bg-red-50" },
 ];
 
 const shortcuts = [
@@ -68,6 +68,7 @@ export default function ChatInterface() {
   const imageInputRef = useRef(null);
   
   const scrollRef = useRef(null);
+  const bottomRef = useRef(null);
   const navigate = useNavigate();
   
   const { upload, isUploading: isUploadLoading, error: uploadError } = useUpload();
@@ -77,10 +78,12 @@ export default function ChatInterface() {
     messages,
     isStreaming,
     error,
+    currentReply,
     products,
     actions,
     sendMessage,
     clearMessages,
+    startNewSession,
   } = useChatStream();
 
   const isChatMode = messages.length > 0;
@@ -90,12 +93,10 @@ export default function ChatInterface() {
     fetchCategories();
   }, [fetchCategories]);
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll to the latest content while streaming
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages]);
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, currentReply, products, actions, isStreaming]);
 
   const handleSendMessage = useCallback(async (text, imageUrl = null) => {
     // Allow sending with just text, just image, or both
@@ -106,7 +107,7 @@ export default function ChatInterface() {
     await sendMessage(message, imageUrl);
     setPrompt("");
     setAttachedImage(null);
-  }, [sendMessage]);
+  }, [sendMessage, isUploading]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -192,32 +193,32 @@ export default function ChatInterface() {
     navigate(`/marketplace${queryString ? `?${queryString}` : ''}`);
   }, [navigate, attachedImage]);
 
-  const canSend = !isStreaming && (prompt.trim() || attachedImage);
+  const canSend = !isStreaming && !isUploading && (prompt.trim() || attachedImage);
 
   return (
-    <div className="flex-1 flex flex-col min-w-0 relative">
+    <div className="flex-1 flex flex-col min-w-0 relative min-h-0">
       {/* Gradient bg */}
       <div
         className="absolute inset-0 opacity-60 pointer-events-none"
         style={{
           background:
-            "radial-gradient(circle at 25% 20%, #e9fce9 0%, transparent 40%), radial-gradient(circle at 75% 15%, #fde6f3 0%, transparent 45%), radial-gradient(circle at 50% 60%, #fff8d6 0%, transparent 50%)",
+            "radial-gradient(circle at 25% 20%, #fff 0%, transparent 40%), radial-gradient(circle at 75% 15%, #f2f2f2 0%, transparent 45%), radial-gradient(circle at 50% 60%, #fff 0%, transparent 50%)",
         }}
       />
 
       {/* Chat / Landing */}
-      <div ref={scrollRef} className="relative flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="relative flex-1 overflow-y-auto min-h-0 pb-32">
         {!isChatMode ? (
           <div className="max-w-4xl mx-auto px-8 pt-8 pb-4">
             {showBanner && (
-              <div className="w-full bg-white/80 backdrop-blur border border-gray-100 rounded-xl px-4 py-2.5 flex items-center gap-3 mb-12">
-                <Sparkles className="w-4 h-4 text-purple-600 shrink-0" />
-                <p className="text-[13px] font-semibold text-gray-700 flex-1">
-                  Introducing Somela: Your AI shopping agent for fashion. Upload a photo to find similar outfits!{" "}
-                  <span className="text-purple-600 font-bold cursor-pointer">Learn more →</span>
+              <div className="w-full bg-white backdrop-blur border border-slate-100 rounded-xl px-4 py-2.5 flex items-center gap-3 mb-12">
+                <Sparkles className="w-4 h-4 text-slate-800 shrink-0" />
+                <p className="text-[13px] font-semibold text-slate-700 flex-1">
+                  Introducing OpenCommerceLens: Your AI shopping agent for fashion. Upload a photo to find similar outfits!{" "}
+                  <span className="text-black font-bold cursor-pointer">Learn more →</span>
                 </p>
                 <button onClick={() => setShowBanner(false)}>
-                  <X className="w-4 h-4 text-gray-400 hover:text-black" />
+                  <X className="w-4 h-4 text-slate-400 hover:text-black" />
                 </button>
               </div>
             )}
@@ -232,7 +233,7 @@ export default function ChatInterface() {
                 <button
                   key={i}
                   onClick={() => handleSuggestionClick(s.label)}
-                  className="flex items-center gap-2 bg-white border border-gray-200 rounded-full pl-2.5 pr-3.5 py-2 text-[12px] font-semibold text-gray-700 hover:border-gray-400 hover:shadow-sm transition"
+                  className="flex items-center gap-2 bg-white border border-slate-200 rounded-full pl-2.5 pr-3.5 py-2 text-[12px] font-semibold text-slate-700 hover:border-slate-400 hover:shadow-sm transition"
                 >
                   <span className={`w-6 h-6 rounded-full flex items-center justify-center ${s.color}`}>
                     <s.icon className="w-3.5 h-3.5" />
@@ -256,7 +257,7 @@ export default function ChatInterface() {
                     <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
                     <div className="absolute bottom-0 left-0 right-0 p-3.5">
                       <p className="text-[14px] font-extrabold text-white mb-1 capitalize">{cat}</p>
-                      <p className="text-[11px] font-medium text-gray-200 leading-snug line-clamp-2">Browse {cat} items</p>
+                      <p className="text-[11px] font-medium text-slate-200 leading-snug line-clamp-2">Browse {cat} items</p>
                     </div>
                   </button>
                 ))}
@@ -264,7 +265,7 @@ export default function ChatInterface() {
               {categories.length > 8 && (
                 <button
                   onClick={() => handleSuggestionClick("Show me all products")}
-                  className="mt-4 flex items-center gap-2 text-[13px] font-semibold text-purple-600 hover:text-purple-700"
+                  className="mt-4 flex items-center gap-2 text-[13px] font-semibold text-black hover:text-black-700"
                 >
                   <Tag className="w-4 h-4" />
                   See all {categories.length} categories
@@ -274,83 +275,43 @@ export default function ChatInterface() {
           </div>
         ) : (
           <div className="max-w-3xl mx-auto px-6 py-6 space-y-5">
+            <div className="flex justify-end">
+              <button
+                onClick={() => void startNewSession()}
+                className="text-[12px] font-bold text-slate-500 hover:text-black transition"
+              >
+                New chat
+              </button>
+            </div>
+
             {messages.map((m, i) => (
               <MessageBubble key={m.id || i} message={m} />
             ))}
             
-            {/* Show products returned by the AI */}
-            {products.length > 0 && (
-              <div className="mt-4">
-                <MessageBubble 
-                  message={{ 
-                    role: "assistant", 
-                    text: "Here are some items you might like:", 
-                    products,
-                    onTryOn: handleTryOn,
-                    onViewCart: handleViewCart,
-                  }} 
-                />
-                {/* Action buttons when products are shown */}
-                <div className="flex items-center gap-3 mt-3 flex-wrap">
-                  {products.length > 1 ? (
-                    <button
-                      onClick={() => handleTryOnAll(products.map(p => p.productId))}
-                      className="flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-full text-[12px] font-bold hover:bg-purple-700 transition"
-                    >
-                      <SparklesIcon className="w-4 h-4" />
-                      Try On All ({products.length})
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => handleTryOn(products[0]?.productId)}
-                      className="flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-full text-[12px] font-bold hover:bg-purple-700 transition"
-                    >
-                      <SparklesIcon className="w-4 h-4" />
-                      Try It On
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleSeeAll({})}
-                    className="flex items-center gap-2 bg-gray-100 text-gray-700 px-4 py-2 rounded-full text-[12px] font-bold hover:bg-gray-200 transition"
-                  >
-                    <Grid className="w-4 h-4" />
-                    See All ({products.length}+)
-                  </button>
-                  <button
-                    onClick={handleViewCart}
-                    className="flex items-center gap-2 bg-gray-100 text-gray-700 px-4 py-2 rounded-full text-[12px] font-bold hover:bg-gray-200 transition"
-                  >
-                    <ShoppingCart className="w-4 h-4" />
-                    Add to Cart
-                  </button>
-                </div>
-              </div>
-            )}
-            
             {/* Show AI action suggestions (try-on suggestions, cart updates) */}
             {actions.filter(a => a.type === 'try_on_suggestion' || a.type === 'added_to_cart').map((action, idx) => (
-              <div key={idx} className="mt-4 bg-gradient-to-r from-purple-50 to-pink-50 rounded-2xl p-4 border border-purple-100">
+              <div key={idx} className="mt-4 bg-gradient-to-r from-black-50 to-pink-50 rounded-2xl p-4 border border-black-100">
                 {action.type === 'try_on_suggestion' && (
                   <>
-                    <p className="text-[13px] font-semibold text-gray-700 mb-2">{action.reason || "Would you like to try this on?"}</p>
+                    <p className="text-[13px] font-semibold text-slate-700 mb-2">{action.reason || "Would you like to try this on?"}</p>
                     <div className="flex items-center gap-3 flex-wrap">
                       <button
                         onClick={() => handleTryOn(action.product?.productId)}
-                        className="flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-full text-[12px] font-bold hover:bg-purple-700 transition"
+                        className="flex items-center gap-2 bg-black text-white px-4 py-2 rounded-full text-[12px] font-bold hover:bg-black-700 transition"
                       >
                         <SparklesIcon className="w-4 h-4" />
                         Try It On
                       </button>
                       <button
                         onClick={() => handleSeeAll({ category: action.product?.category })}
-                        className="flex items-center gap-2 bg-white text-gray-700 px-4 py-2 rounded-full text-[12px] font-bold hover:bg-gray-50 transition border border-gray-200"
+                        className="flex items-center gap-2 bg-white text-slate-700 px-4 py-2 rounded-full text-[12px] font-bold hover:bg-slate-50 transition border border-slate-200"
                       >
                         <Grid className="w-4 h-4" />
                         See All Similar
                       </button>
                       <button
                         onClick={handleViewCart}
-                        className="flex items-center gap-2 bg-white text-gray-700 px-4 py-2 rounded-full text-[12px] font-bold hover:bg-gray-50 transition border border-gray-200"
+                        className="flex items-center gap-2 bg-white text-slate-700 px-4 py-2 rounded-full text-[12px] font-bold hover:bg-slate-50 transition border border-slate-200"
                       >
                         <ShoppingCart className="w-4 h-4" />
                         Add to Cart
@@ -378,10 +339,10 @@ export default function ChatInterface() {
             {/* Streaming indicator */}
             {isStreaming && (
               <div className="flex items-start gap-2.5">
-                <div className="w-7 h-7 rounded-full bg-purple-100 flex items-center justify-center shrink-0 mt-0.5">
-                  <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                <div className="w-7 h-7 rounded-full bg-black-100 flex items-center justify-center shrink-0 mt-0.5">
+                  <Sparkles className="w-3.5 h-3.5 text-black" />
                 </div>
-                <div className="flex items-center gap-2 text-gray-400 text-sm">
+                <div className="flex items-center gap-2 text-slate-400 text-sm">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   Thinking...
                 </div>
@@ -396,11 +357,12 @@ export default function ChatInterface() {
             )}
           </div>
         )}
+        <div ref={bottomRef} className="h-px" />
       </div>
 
       {/* Bottom: input */}
       <div className="relative max-w-3xl w-full mx-auto px-6 pb-6">
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-3">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
           {/* Image preview */}
           {attachedImage && (
             <div className="mb-2 relative inline-block">
@@ -430,7 +392,7 @@ export default function ChatInterface() {
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Describe what you're looking for or upload an image..."
-            className="w-full text-[14px] font-medium text-gray-800 placeholder-gray-400 outline-none px-2 py-2 resize-none"
+            className="w-full text-[14px] font-medium text-slate-800 placeholder-slate-400 outline-none px-2 py-2 resize-none"
             rows={1}
             style={{ minHeight: '24px', maxHeight: '120px' }}
           />
@@ -439,7 +401,7 @@ export default function ChatInterface() {
             <div className="flex items-center gap-3">
               <button 
                 onClick={handleAttachClick}
-                className="flex items-center gap-1.5 text-[11px] font-bold text-gray-500 hover:text-black transition disabled:opacity-50"
+                className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 hover:text-black transition disabled:opacity-50"
                 disabled={isUploading}
               >
                 <Paperclip className="w-3.5 h-3.5" /> 
@@ -447,7 +409,7 @@ export default function ChatInterface() {
               </button>
               <button 
                 onClick={handleImageButtonClick}
-                className="flex items-center gap-1.5 text-[11px] font-bold text-gray-500 hover:text-black transition disabled:opacity-50"
+                className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 hover:text-black transition disabled:opacity-50"
                 disabled={isUploading}
               >
                 {isUploading ? (
@@ -462,7 +424,7 @@ export default function ChatInterface() {
             <button
               onClick={() => handleSendMessage(prompt, attachedImage)}
               disabled={!canSend}
-              className="w-8 h-8 bg-black rounded-full flex items-center justify-center hover:bg-gray-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-8 h-8 bg-black rounded-full flex items-center justify-center hover:bg-slate-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isStreaming ? (
                 <Loader2 className="w-4 h-4 text-white animate-spin" />
@@ -492,3 +454,7 @@ export default function ChatInterface() {
     </div>
   );
 }
+
+
+
+

@@ -1,4 +1,8 @@
-import { z } from "zod";
+﻿import { z } from "zod";
+
+const optionalUrlSchema = z.preprocess((value) => {
+  return value === null ? undefined : value;
+}, z.string().url().optional());
 
 // ============================================================================
 // Catalog API
@@ -22,7 +26,7 @@ export type CatalogFilters = z.infer<typeof CatalogFiltersSchema>;
 
 export const SemanticSearchSchema = z.object({
   text: z.string().optional(),
-  imageUrl: z.string().url().optional(),
+  imageUrl: optionalUrlSchema,
   limit: z.number().min(1).max(50).default(12),
 });
 
@@ -35,7 +39,7 @@ export type SemanticSearch = z.infer<typeof SemanticSearchSchema>;
 export const ChatMessageSchema = z.object({
   role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
-  imageUrl: z.string().url().optional(), // Optional image attachment
+  imageUrl: optionalUrlSchema, // Optional image attachment
 });
 
 export const ChatRequestSchema = z.object({
@@ -43,7 +47,7 @@ export const ChatRequestSchema = z.object({
   message: z.string().min(1).max(2000),
   userId: z.string().optional(), // Optional user ID for authenticated users
   history: z.array(ChatMessageSchema).optional(),
-  imageUrl: z.string().url().optional(), // Image URL for visual search
+  imageUrl: optionalUrlSchema, // Image URL for visual search
 });
 
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
@@ -91,7 +95,7 @@ export type TryonResponse = z.infer<typeof TryonResponseSchema>;
 // ============================================================================
 
 export const VisualSearchRequestSchema = z.object({
-  imageUrl: z.string().url().optional(),
+  imageUrl: optionalUrlSchema,
   text: z.string().optional(),
 });
 
@@ -143,3 +147,4 @@ export const UpdateCartItemSchema = z.object({
 
 export type AddCartItem = z.infer<typeof AddCartItemSchema>;
 export type UpdateCartItem = z.infer<typeof UpdateCartItemSchema>;
+

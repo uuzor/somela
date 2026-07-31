@@ -17,6 +17,7 @@ import {
   type YouCamWebhookPayload,
 } from "../services/youcam.js";
 import { uploadToStorage, generateStoragePath, downloadFromUrl } from "../services/supabase.js";
+import { resolveRequestIdentity } from "../middleware/supabaseAuth.js";
 
 export const tryonRouter = Router();
 
@@ -66,9 +67,10 @@ tryonRouter.post("/multi", async (req, res) => {
       selfieId: z.string().optional(),
     }).parse(req.body);
     
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Authentication required" });
+      return res.status(401).json({ error: "Authorization required" });
     }
     
     if (!isYouCamConfigured()) {
@@ -248,9 +250,10 @@ tryonRouter.post("/", async (req, res) => {
     const input = TryonRequestSchema.parse(req.body);
     
     // Get user from auth header
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Authentication required" });
+      return res.status(401).json({ error: "Authorization required" });
     }
     
     if (!isYouCamConfigured()) {
@@ -338,96 +341,13 @@ tryonRouter.post("/", async (req, res) => {
   }
 });
 
-// GET /api/tryon/:taskId - Get try-on status
-tryonRouter.get("/:taskId", async (req, res) => {
-  try {
-    const { taskId } = req.params;
-    
-    const [task] = await db
-      .select()
-      .from(tryonTasks)
-      .where(eq(tryonTasks.id, taskId))
-      .limit(1);
-    
-    if (!task) {
-      return res.status(404).json({ error: "Try-on task not found" });
-    }
-    
-    // If task is still processing, poll YouCam for latest status
-    if (task.status === "processing" && task.externalTaskId && isYouCamConfigured()) {
-      try {
-        const apiKey = getYouCamApiKey();
-        const youcamStatus = await getTaskStatus(task.externalTaskId, "cloth-v3", apiKey);
-        
-        console.log(`Polled YouCam for task ${task.externalTaskId}:`, youcamStatus.task_status);
-        
-        const resultUrl = extractResultUrl(youcamStatus);
-        
-        // Update local status if changed
-        if (youcamStatus.task_status === "success" && resultUrl) {
-          await db
-            .update(tryonTasks)
-            .set({
-              status: "completed",
-              resultImageUrl: resultUrl,
-              completedAt: new Date(),
-            })
-            .where(eq(tryonTasks.id, task.id));
-          
-          return res.json({
-            taskId: task.id,
-            status: "completed",
-            productIds: task.productIds,
-            resultImageUrl: resultUrl,
-            completedAt: new Date().toISOString(),
-          });
-        }
-        
-        if (youcamStatus.task_status === "error") {
-          await db
-            .update(tryonTasks)
-            .set({
-              status: "failed",
-              errorMessage: youcamStatus.error?.message || "YouCam processing failed",
-              completedAt: new Date(),
-            })
-            .where(eq(tryonTasks.id, task.id));
-          
-          return res.json({
-            taskId: task.id,
-            status: "failed",
-            productIds: task.productIds,
-            errorMessage: youcamStatus.error?.message || "YouCam processing failed",
-            completedAt: new Date().toISOString(),
-          });
-        }
-      } catch (pollError) {
-        console.error("Failed to poll YouCam:", pollError);
-        // Continue with local status
-      }
-    }
-    
-    res.json({
-      taskId: task.id,
-      status: task.status,
-      productIds: task.productIds,
-      resultImageUrl: task.resultImageUrl,
-      errorMessage: task.errorMessage,
-      createdAt: task.createdAt,
-      completedAt: task.completedAt,
-    });
-  } catch (error) {
-    console.error("Try-on status error:", error);
-    res.status(500).json({ error: "Failed to get try-on status" });
-  }
-});
-
 // POST /api/tryon/selfie - Upload selfie
 tryonRouter.post("/selfie", async (req, res) => {
   try {
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Authentication required" });
+      return res.status(401).json({ error: "Authorization required" });
     }
     
     const { imageUrl } = req.body;
@@ -466,9 +386,10 @@ tryonRouter.post("/selfie", async (req, res) => {
 // GET /api/tryon/selfies - List user selfies
 tryonRouter.get("/selfies", async (req, res) => {
   try {
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Authentication required" });
+      return res.status(401).json({ error: "Authorization required" });
     }
     
     const selfies = await db
@@ -573,5 +494,86 @@ tryonRouter.post("/webhook", async (req, res) => {
   }
 });
 
-// Raw body middleware for webhook signature verification
-// This needs to be registered in index.ts
+// GET /api/tryon/:taskId - Get try-on status
+tryonRouter.get("/:taskId", async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    
+    const [task] = await db
+      .select()
+      .from(tryonTasks)
+      .where(eq(tryonTasks.id, taskId))
+      .limit(1);
+    
+    if (!task) {
+      return res.status(404).json({ error: "Try-on task not found" });
+    }
+    
+    // If task is still processing, poll YouCam for latest status
+    if (task.status === "processing" && task.externalTaskId && isYouCamConfigured()) {
+      try {
+        const apiKey = getYouCamApiKey();
+        const youcamStatus = await getTaskStatus(task.externalTaskId, "cloth-v3", apiKey);
+        
+        console.log(`Polled YouCam for task ${task.externalTaskId}:`, youcamStatus.task_status);
+        
+        const resultUrl = extractResultUrl(youcamStatus);
+        
+        // Update local status if changed
+        if (youcamStatus.task_status === "success" && resultUrl) {
+          await db
+            .update(tryonTasks)
+            .set({
+              status: "completed",
+              resultImageUrl: resultUrl,
+              completedAt: new Date(),
+            })
+            .where(eq(tryonTasks.id, task.id));
+          
+          return res.json({
+            taskId: task.id,
+            status: "completed",
+            productIds: task.productIds,
+            resultImageUrl: resultUrl,
+            completedAt: new Date().toISOString(),
+          });
+        }
+        
+        if (youcamStatus.task_status === "error") {
+          await db
+            .update(tryonTasks)
+            .set({
+              status: "failed",
+              errorMessage: youcamStatus.error?.message || "YouCam processing failed",
+              completedAt: new Date(),
+            })
+            .where(eq(tryonTasks.id, task.id));
+          
+          return res.json({
+            taskId: task.id,
+            status: "failed",
+            productIds: task.productIds,
+            errorMessage: youcamStatus.error?.message || "YouCam processing failed",
+            completedAt: new Date().toISOString(),
+          });
+        }
+      } catch (pollError) {
+        console.error("Failed to poll YouCam:", pollError);
+        // Continue with local status
+      }
+    }
+    
+    res.json({
+      taskId: task.id,
+      status: task.status,
+      productIds: task.productIds,
+      resultImageUrl: task.resultImageUrl,
+      errorMessage: task.errorMessage,
+      createdAt: task.createdAt,
+      completedAt: task.completedAt,
+    });
+  } catch (error) {
+    console.error("Try-on status error:", error);
+    res.status(500).json({ error: "Failed to get try-on status" });
+  }
+});

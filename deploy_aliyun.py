@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Alibaba Cloud Deployment Script for Somela
+Alibaba Cloud Deployment Script for OpenCommerceLens
 Deploys frontend to OSS, backend config
 """
 
@@ -24,7 +24,7 @@ load_dotenv('./backend/.env')
 ACCESS_KEY_ID = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID')
 ACCESS_KEY_SECRET = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
 REGION_ID = os.getenv('ALIBABA_CLOUD_REGION_ID', 'ap-southeast-1')
-BUCKET_NAME = 'somela-frontend'
+BUCKET_NAME = 'opencommercelens-frontend'
 
 if not ACCESS_KEY_ID or not ACCESS_KEY_SECRET:
     print("❌ Missing Alibaba Cloud credentials in backend/.env")
@@ -251,7 +251,7 @@ def set_index_page():
 
 
 def main():
-    print("🚀 Alibaba Cloud Deployment for Somela\n")
+    print("🚀 Alibaba Cloud Deployment for OpenCommerceLens\n")
     print(f"Region: {REGION_ID}")
     print(f"Access Key: {ACCESS_KEY_ID[:8]}...")
     print(f"Bucket: {BUCKET_NAME}\n")
@@ -295,3 +295,4 @@ if __name__ == '__main__':
         import oss2
     
     main()
+

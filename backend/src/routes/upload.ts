@@ -1,12 +1,43 @@
 import { Router } from "express";
-import { randomUUID } from "crypto";
 import { db, userSelfies } from "../db/index.js";
-import { eq } from "drizzle-orm";
 import { uploadToStorage, generateStoragePath } from "../services/supabase.js";
+import { resolveRequestIdentity } from "../middleware/supabaseAuth.js";
 
 export const uploadRouter = Router();
 
 const BUCKET_NAME = "images";
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+function isSafeRemoteUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return false;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "0.0.0.0" ||
+      host.startsWith("10.") ||
+      host.startsWith("192.168.") ||
+      host.startsWith("169.254.") ||
+      host.startsWith("172.16.") ||
+      host.startsWith("172.17.") ||
+      host.startsWith("172.18.") ||
+      host.startsWith("172.19.") ||
+      host.startsWith("172.2")
+    ) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * POST /api/upload/selfie - Upload a selfie for try-on
@@ -15,9 +46,10 @@ const BUCKET_NAME = "images";
  */
 uploadRouter.post("/selfie", async (req, res) => {
   try {
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Authentication required" });
+      return res.status(401).json({ error: "Authorization required" });
     }
 
     const { imageUrl, imageData } = req.body;
@@ -25,10 +57,8 @@ uploadRouter.post("/selfie", async (req, res) => {
     let publicUrl: string;
 
     if (imageUrl) {
-      // If URL is provided, use it directly (already uploaded elsewhere)
       publicUrl = imageUrl;
     } else if (imageData) {
-      // If base64 data is provided, upload to Supabase
       const path = generateStoragePath(`selfies/${userId}`, "jpg");
       const buffer = Buffer.from(imageData, "base64");
       publicUrl = await uploadToStorage(BUCKET_NAME, path, buffer, "image/jpeg");
@@ -36,7 +66,6 @@ uploadRouter.post("/selfie", async (req, res) => {
       return res.status(400).json({ error: "imageUrl or imageData required" });
     }
 
-    // Create selfie record in DB
     const [selfie] = await db.insert(userSelfies).values({
       userId,
       imageUrl: publicUrl,
@@ -69,6 +98,11 @@ uploadRouter.post("/image", async (req, res) => {
 
     const path = generateStoragePath(folder, contentType === "image/png" ? "png" : "jpg");
     const buffer = Buffer.from(imageData, "base64");
+
+    if (buffer.length > MAX_UPLOAD_BYTES) {
+      return res.status(413).json({ error: "Image exceeds maximum size" });
+    }
+
     const publicUrl = await uploadToStorage(BUCKET_NAME, path, buffer, contentType);
 
     res.status(201).json({
@@ -93,15 +127,36 @@ uploadRouter.post("/from-url", async (req, res) => {
       return res.status(400).json({ error: "url required" });
     }
 
-    // Fetch the image
-    const response = await fetch(url);
+    if (!isSafeRemoteUrl(url)) {
+      return res.status(400).json({ error: "Invalid or unsafe URL" });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+
     if (!response.ok) {
       return res.status(400).json({ error: "Failed to fetch image" });
     }
 
-    const arrayBuffer = await response.arrayBuffer();
     const contentType = response.headers.get("content-type") || "image/jpeg";
+    if (!contentType.startsWith("image/")) {
+      return res.status(400).json({ error: "URL did not return an image" });
+    }
+
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > MAX_UPLOAD_BYTES) {
+      return res.status(413).json({ error: "Image exceeds maximum size" });
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+
+    if (buffer.length > MAX_UPLOAD_BYTES) {
+      return res.status(413).json({ error: "Image exceeds maximum size" });
+    }
 
     const path = generateStoragePath(folder, contentType === "image/png" ? "png" : "jpg");
     const publicUrl = await uploadToStorage(BUCKET_NAME, path, buffer, contentType);

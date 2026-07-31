@@ -85,4 +85,41 @@ Both are legitimate "headless agent wired into your own infra" options and eithe
 1. **Prava token/checkout compatibility** — highest severity, confirm by Day 6 at the latest.
 2. **Bot-protected stores** (madhappy, officinegenerale, adoredvintage) — not blocking, revisit with browser UA / headless fetch, or leave as mock.
 3. **Scraped-data attribute gaps** (color being the first one found) — treat as an ongoing discipline: spot-check a sample after every real ingestion run, don't assume the schema is clean because it type-checked.
-4. **Agent-loop cost/latency** — only the discovery and checkout turns should go through the full agent loop; catalog browsing and try-on execution stay on deterministic/fast paths. Don't let this drift as the codebase grows.
+4. **Agent-loop cost/latency** — only the discovery and checkout turns should go through the full agent loop; catalog browsing and try-on execution stay on deterministic/fast paths. Don't let this drift as the codebase grows
+
+
+
+
+
+
+
+
+
+Use this version:
+
+  1. Describe your company or idea in a single sentence
+  OpenCommerceLens is an AI-native shopping assistant that turns natural conversation into personalized product discovery, comparison, try-
+  on, and checkout in a single seamless flow.
+
+  2. Why are you working on this idea?
+  I’m working on this because e-commerce still forces people to do too much manual work before they can buy anything: search, filter,
+  compare, and jump between tools. I believe shopping should feel more like a high-trust conversation that quickly understands intent,
+  narrows options, and helps people make better decisions with less friction. OpenCommerceLens is my attempt to build that experience from
+  the ground up.
+
+  3. How far along are you? Describe your progress to-date
+  I have a working product prototype with a chat-first discovery experience, streaming AI responses, tool calling, backend session
+  persistence, Google authentication, markdown-formatted assistant responses, and a live frontend-backend flow that already supports moving
+  from conversation into product exploration and canvas-based actions. The core architecture is in place, and I’m actively iterating on the
+  interaction model, backend contracts, and product surfaces.
+
+  4. Give a breakdown of the equity ownership in percentages among yourself and any other stockholders
+  I own 100% of the company. There are no other stockholders.
+
+  5. Share something you have achieved in the past that you are particularly proud of accomplishing
+  One thing I’m especially proud of is launching a video production AI platform end to end. It required taking an idea from concept to a real
+  product, shipping the technical infrastructure, and making the experience usable enough for people to actually adopt. That taught me how to
+  build and iterate quickly on AI products with a real user workflow, which is directly informing how I’m building OpenCommerceLens.
+
+  If you want, I can make these even stronger in one of these directions:
+.

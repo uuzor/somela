@@ -1,5 +1,5 @@
 {
-  "name": "somela-backend",
+  "name": "opencommercelens-backend",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -38,3 +38,4 @@
     "typescript": "^5.6.3"
   }
 }
+

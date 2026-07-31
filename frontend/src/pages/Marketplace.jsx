@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import Navbar from "@/components/dashboard/Navbar";
+import AppShell from "@/components/layout/AppShell";
 import FilterSidebar from "@/components/dashboard/FilterSidebar";
 import ProductGrid from "@/components/dashboard/ProductGrid";
 import AIAssistant from "@/components/dashboard/AIAssistant";
@@ -100,9 +100,8 @@ export default function Marketplace() {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-white overflow-hidden">
-      <Navbar />
-      <div className="flex flex-1 overflow-hidden">
+    <AppShell>
+      <div className="flex h-full min-h-0 overflow-hidden bg-white">
         {/* Left: Filters + Products */}
         <div className="flex flex-1 overflow-hidden">
           {/* Filter Sidebar */}
@@ -212,6 +211,6 @@ export default function Marketplace() {
         {/* Right: AI Assistant */}
         <AIAssistant />
       </div>
-    </div>
+    </AppShell>
   );
 }

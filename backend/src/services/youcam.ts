@@ -383,7 +383,6 @@ export async function processSelfie(
       .update(userSelfies)
       .set({
         processedImageUrl: processedUrl,
-        updatedAt: new Date(),
       })
       .where(eq(userSelfies.id, selfieId));
 

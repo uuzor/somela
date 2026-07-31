@@ -115,7 +115,7 @@ export default function TryOnCanvas({
           {resultImage && (
             <a 
               href={resultImage} 
-              download="somela-tryon.jpg"
+              download="opencommercelens-tryon.jpg"
               target="_blank"
               rel="noopener noreferrer"
               className="h-9 px-3 rounded-lg bg-black text-white text-[12px] font-bold flex items-center gap-1.5 hover:bg-gray-800 transition"

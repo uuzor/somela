@@ -13,7 +13,7 @@ const client = axios.create({
 // Request interceptor to add session token
 client.interceptors.request.use(
   (config) => {
-    const storedSession = localStorage.getItem('somela_session');
+    const storedSession = localStorage.getItem('opencommercelens_session');
     if (storedSession) {
       const { sessionToken } = JSON.parse(storedSession);
       config.headers['x-session-token'] = sessionToken;
@@ -29,7 +29,7 @@ client.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       // Session expired - clear and reinitialize
-      localStorage.removeItem('somela_session');
+      localStorage.removeItem('opencommercelens_session');
       window.location.reload();
     }
     return Promise.reject(error);
@@ -38,9 +38,9 @@ client.interceptors.response.use(
 
 // Helper for SSE streaming
 export const createStream = async (url, body, onMessage, onError, onComplete) => {
-  const storedSession = localStorage.getItem('somela_session');
+  const storedSession = localStorage.getItem('opencommercelens_session');
   const sessionToken = storedSession ? JSON.parse(storedSession).sessionToken : null;
-  
+
   const headers = {
     'Content-Type': 'application/json',
   };
@@ -61,29 +61,53 @@ export const createStream = async (url, body, onMessage, onError, onComplete) =>
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    let eventType = 'message';
+    let dataBuffer = [];
+
+    const flushEvent = () => {
+      if (!dataBuffer.length) {
+        eventType = 'message';
+        return;
+      }
+
+      const rawData = dataBuffer.join('\n').trim();
+      dataBuffer = [];
+      const currentEventType = eventType;
+      eventType = 'message';
+
+      if (!rawData) return;
+
+      try {
+        const parsed = JSON.parse(rawData);
+        onMessage(currentEventType, parsed);
+      } catch (e) {
+        onMessage(currentEventType, rawData);
+      }
+    };
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        flushEvent();
+        break;
+      }
 
       const chunk = decoder.decode(value, { stream: true });
       const lines = chunk.split('\n');
 
       for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          const eventType = line.slice(7).trim();
+        if (line === '' || line === '\r') {
+          flushEvent();
           continue;
         }
+
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim();
+          continue;
+        }
+
         if (line.startsWith('data: ')) {
-          const data = line.slice(6).trim();
-          if (data) {
-            try {
-              const parsed = JSON.parse(data);
-              onMessage(eventType, parsed);
-            } catch (e) {
-              // Skip invalid JSON
-            }
-          }
+          dataBuffer.push(line.slice(6));
         }
       }
     }
@@ -98,11 +122,17 @@ export const createStream = async (url, body, onMessage, onError, onComplete) =>
 
 // API methods
 export const apiClient = {
-  get: (url, config) => client.get(url, config),
-  post: (url, data, config) => client.post(url, data, config),
-  put: (url, data, config) => client.put(url, data, config),
-  delete: (url, config) => client.delete(url, config),
-  patch: (url, data, config) => client.patch(url, data, config),
+  get: async (url, config) => (await client.get(url, config)).data,
+  post: async (url, data, config) => (await client.post(url, data, config)).data,
+  put: async (url, data, config) => (await client.put(url, data, config)).data,
+  delete: async (url, config) => (await client.delete(url, config)).data,
+  patch: async (url, data, config) => (await client.patch(url, data, config)).data,
 };
 
 export default apiClient;
+
+
+
+
+
+

@@ -1,0 +1,2 @@
+import { SlidersHorizontal, X } from 'lucide-react';
+export default function FilterBar(){return <div className="flex items-center gap-2 flex-wrap"><span className="chip">Black<X size={12}/></span><span className="chip">Under $120<X size={12}/></span><span className="chip">Size M<X size={12}/></span><span className="chip">Ships to Nigeria<X size={12}/></span><button className="text-xs text-primary ml-1">Clear all</button><button className="control ml-auto">Sort by&nbsp; <b>Best match</b></button><button className="icon-control"><SlidersHorizontal size={15}/></button></div>}

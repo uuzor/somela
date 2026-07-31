@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import Navbar from "@/components/dashboard/Navbar";
+import AppShell from "@/components/layout/AppShell";
 import TryOnCanvas from "@/components/tryon/TryOnCanvas";
 import ModelPanel from "@/components/tryon/ModelPanel";
 import OutfitPanel from "@/components/tryon/OutfitPanel";
@@ -166,9 +166,8 @@ export default function TryOn() {
   }, [addToCart]);
 
   return (
-    <div className="h-screen flex flex-col bg-white overflow-hidden">
-      <Navbar />
-      <div className="flex flex-1 overflow-hidden">
+    <AppShell>
+      <div className="flex h-full min-h-0 overflow-hidden bg-white">
         {/* Left: Canvas (widest) */}
         <TryOnCanvas
           selectedModel={selectedModel}
@@ -206,6 +205,6 @@ export default function TryOn() {
         {/* Right: AI Assistant */}
         <AIAssistant />
       </div>
-    </div>
+    </AppShell>
   );
 }

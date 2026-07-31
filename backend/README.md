@@ -1,6 +1,6 @@
-# Somela Backend
+# OpenCommerceLens Backend
 
-Express.js API for the Somela shopping agent.
+Express.js API for the OpenCommerceLens shopping agent.
 
 ## Quick Start
 
@@ -139,3 +139,4 @@ src/
 └── types/           # TypeScript types
     └── api.ts       # Zod schemas
 ```
+

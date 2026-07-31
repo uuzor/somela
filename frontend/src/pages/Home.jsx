@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import Navbar from "@/components/dashboard/Navbar";
+import AppShell from "@/components/layout/AppShell";
 import FilterSidebar from "@/components/dashboard/FilterSidebar";
 import ProductGrid from "@/components/dashboard/ProductGrid";
 import AIAssistant from "@/components/dashboard/AIAssistant";
@@ -13,15 +13,14 @@ export default function Home() {
   });
 
   return (
-    <div className="h-screen flex flex-col bg-white overflow-hidden">
-      <Navbar />
-      <div className="flex flex-1 overflow-hidden">
+    <AppShell>
+      <div className="flex h-full min-h-0 overflow-hidden bg-white">
         <div className="flex flex-1 overflow-y-auto py-4 pl-5">
           <FilterSidebar filters={filters} setFilters={setFilters} />
           <ProductGrid filters={filters} setFilters={setFilters} />
         </div>
         <AIAssistant />
       </div>
-    </div>
+    </AppShell>
   );
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Alibaba Cloud Deployment Script
- * Deploys Somela frontend to OSS and backend configuration
+ * Deploys OpenCommerceLens frontend to OSS and backend configuration
  */
 
 import AlibabaCloud from '@alicloud/openapi-client';
@@ -25,7 +25,7 @@ if (!ALIBABA_CLOUD_ACCESS_KEY_ID || !ALIBABA_CLOUD_ACCESS_KEY_SECRET) {
 }
 
 // Configuration
-const BUCKET_NAME = 'somela-frontend';
+const BUCKET_NAME = 'opencommercelens-frontend';
 const FRONTEND_DIST = './frontend/dist';
 const BACKEND_DIR = './backend';
 
@@ -129,3 +129,4 @@ async function main() {
 }
 
 main();
+

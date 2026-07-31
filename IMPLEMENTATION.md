@@ -1,4 +1,4 @@
-# Somela Implementation Plan
+# OpenCommerceLens Implementation Plan
 
 **Created:** Jul 25, 2026  
 **Goal:** Build core shopping discovery → visual search → AI try-on → payments
@@ -281,7 +281,7 @@
 ## File Structure (Current)
 
 ```
-/workspace/project/somela/
+/workspace/project/opencommercelens/
 ├── backend/                    # NEW: Express + Drizzle backend
 │   ├── src/
 │   │   ├── index.ts          # Express app entry
@@ -321,7 +321,7 @@ Copy `.env.example` to `.env` and fill in:
 
 ```bash
 # Required for Phase 1
-DATABASE_URL=postgresql://user:password@localhost:5432/somela
+DATABASE_URL=postgresql://user:password@localhost:5432/opencommercelens
 
 # Required for Phase 2 (embeddings)
 VOYAGE_API_KEY=voyage-xxxxx
@@ -333,3 +333,4 @@ YOUCAM_WEBHOOK_SECRET=whsec_xxxxx
 # Required for Phase 3 (chat agent)
 ANTHROPIC_API_KEY=sk-ant-xxxxx
 ```
+

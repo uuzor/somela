@@ -12,8 +12,13 @@ import {
   type StreamingEvent,
 } from "../services/agent.js";
 import { formatSSEMessage } from "../services/validation.js";
+import { resolveRequestIdentity } from "../middleware/supabaseAuth.js";
 
 export const chatRouter = Router();
+
+const logChatFlow = (requestId: string, step: string, meta?: unknown) => {
+  console.log(`[CHAT_FLOW ${requestId}] ${step}`, meta ?? "");
+};
 
 // Apply strict rate limiting (chat is expensive)
 chatRouter.post("/", strictRateLimit);
@@ -23,7 +28,11 @@ chatRouter.post("/", strictRateLimit);
  */
 chatRouter.post("/", async (req, res) => {
   try {
+    const requestId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    logChatFlow(requestId, "request_received", { path: req.path, bodyKeys: Object.keys(req.body || {}) });
     const input = ChatRequestSchema.parse(req.body);
+    logChatFlow(requestId, "request_validated", { sessionId: input.sessionId, userId: input.userId || null, hasImage: !!input.imageUrl });
+    const identity = await resolveRequestIdentity(req);
     
     // Check for OpenAI or OpenRouter API key
     if (!isAgentAvailable()) {
@@ -35,8 +44,10 @@ chatRouter.post("/", async (req, res) => {
     
     // Get or create conversation
     const { sessionId, message, imageUrl } = input;
-    const userId = input.userId || sessionId;
+    const userId = identity.userId || input.userId || sessionId;
+    logChatFlow(requestId, "identity_resolved", { userId, sessionId, messageLength: message.length, hasImage: !!imageUrl });
     
+    logChatFlow(requestId, "db_history_load_start");
     // Load conversation history from DB
     const [conversation] = await db
       .select()
@@ -49,6 +60,8 @@ chatRouter.post("/", async (req, res) => {
       ? (conversation.messages as any[]) 
       : [];
     
+    logChatFlow(requestId, "db_history_load_ok", { conversationFound: !!conversation, messageCount: conversationHistory.length });
+
     // Load shopping state
     const [prefs] = await db
       .select()
@@ -57,6 +70,7 @@ chatRouter.post("/", async (req, res) => {
       .limit(1);
     
     // Build shopping state from preferences
+    logChatFlow(requestId, "db_preferences_load_ok", { hasPreferences: !!prefs });
     const shoppingState: ShoppingState = {
       activeFilters: {
         category: prefs?.preferredStyles?.[0],
@@ -68,6 +82,7 @@ chatRouter.post("/", async (req, res) => {
     };
     
     // Run the agent (pass imageUrl for visual search)
+    logChatFlow(requestId, "agent_start");
     const result = await runAgent({
       sessionId,
       userId,
@@ -78,6 +93,7 @@ chatRouter.post("/", async (req, res) => {
     });
     
     // Save conversation to DB using full message history from agent
+    logChatFlow(requestId, "agent_complete", { replyLength: result.chatReply?.length || 0, actionCount: result.actions?.length || 0, messageCount: (result.messages || []).length });
     const newHistory = result.messages || [];
     
     if (conversation) {
@@ -97,11 +113,13 @@ chatRouter.post("/", async (req, res) => {
       });
     }
     
+
     res.json({
       reply: result.chatReply,
       uiPayload: result.uiPayload,
       actions: result.actions,
       conversationId: result.conversationId,
+      state: result.updatedState?.chatState || result.chatState || "chat",
     });
     
   } catch (error) {
@@ -118,143 +136,109 @@ chatRouter.post("/", async (req, res) => {
  * Uses Server-Sent Events (SSE) to stream updates to the frontend
  */
 chatRouter.post("/stream", strictRateLimit, async (req, res) => {
+  const requestId = `chat_stream_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
   try {
+    logChatFlow(requestId, "stream_request_received", { path: req.path, bodyKeys: Object.keys(req.body || {}) });
     const input = ChatRequestSchema.parse(req.body);
-    
-    // Check for OpenAI or OpenRouter API key
+    logChatFlow(requestId, "stream_request_validated", { sessionId: input.sessionId, userId: input.userId || null, hasImage: !!input.imageUrl });
+
     if (!isAgentAvailable()) {
-      res.status(503).json({
+      return res.status(503).json({
         error: "Chat not available",
         reason: "OPENAI_API_KEY or OPENROUTER_API_KEY not configured",
       });
-      return;
     }
-    
-    // Get or create conversation
+
     const { sessionId, message, imageUrl } = input;
     const userId = input.userId || sessionId;
-    
-    // Load conversation history from DB
-    const [conversation] = await db
-      .select()
-      .from(conversations)
-      .where(and(eq(conversations.userId, userId), eq(conversations.sessionId, sessionId)))
-      .limit(1);
-    
-    // Convert DB messages to agent format
-    const conversationHistory: AgentMessage[] = conversation?.messages 
-      ? (conversation.messages as any[]) 
-      : [];
-    
-    // Load shopping state
-    const [prefs] = await db
-      .select()
-      .from(userPreferences)
-      .where(eq(userPreferences.userId, userId))
-      .limit(1);
-    
-    // Build shopping state from preferences
-    const shoppingState: ShoppingState = {
-      activeFilters: {
-        category: prefs?.preferredStyles?.[0],
-        color: prefs?.preferredColors?.[0],
-        minPrice: undefined,
-        maxPrice: prefs?.maxPrice ? parseFloat(String(prefs.maxPrice)) : undefined,
-      },
-      visibleProductIds: [],
-    };
-    
-    // Set up SSE
+
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
-    
-    // Flush headers
+    res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
-    
-    // Send initial connection event
+
+    logChatFlow(requestId, "stream_sse_start");
     res.write(formatSSEMessage({
       event: "connected",
-      data: { sessionId, conversationId: sessionId, hasImage: !!imageUrl },
+      data: { sessionId, conversationId: sessionId, hasImage: !!imageUrl, state: "chat" },
     }));
-    
-    // Collect final state
-    let finalReply = "";
-    let finalUIPayload: any = null;
-    let finalActions: any[] = [];
-    
-    // Streaming callback
-    const sendEvent = (event: StreamingEvent) => {
-      // Send event to client
-      res.write(formatSSEMessage(event));
-      
-      // Collect final state
-      if (event.event === "text") {
-        finalReply += event.data;
-      } else if (event.event === "ui_payload") {
-        finalUIPayload = event.data;
-      } else if (event.event === "ui_action") {
-        finalActions.push(event.data);
-      }
-    };
-    
-    // Run the agent with streaming (pass imageUrl for visual search)
+
+    let reply = "";
+    let uiPayload: any = { type: "replace_catalog", products: [] };
+    let actions: any[] = [];
+    let chatState = "chat";
+
     const messages = await runAgentStream({
       sessionId,
       userId,
       message,
       imageUrl,
-      conversationHistory,
-      shoppingState,
-      onEvent: sendEvent,
+      conversationHistory: [],
+      shoppingState: {
+        activeFilters: {
+          category: undefined,
+          color: undefined,
+          minPrice: undefined,
+          maxPrice: undefined,
+        },
+        visibleProductIds: [],
+      },
+      onEvent: (event) => {
+        if (event.event === "text") {
+          reply += event.data;
+        } else if (event.event === "ui_payload") {
+          uiPayload = event.data;
+        } else if (event.event === "ui_action") {
+          actions.push(event.data);
+        } else if (event.event === "ui_state") {
+          chatState = event.data.state;
+        }
+
+        res.write(formatSSEMessage(event));
+      },
     });
-    
-    // Save conversation to DB after streaming completes
-    const newHistory = messages || [];
-    
-    if (conversation) {
-      await db.update(conversations)
-        .set({ 
-          messages: newHistory as any,
-          lastPreferences: prefs as any,
-          updatedAt: new Date(),
-        })
-        .where(eq(conversations.id, conversation.id));
+
+    logChatFlow(requestId, "stream_agent_complete", {
+      replyLength: reply.length,
+      actionCount: actions.length,
+      messageCount: messages.length,
+      state: chatState,
+    });
+
+    logChatFlow(requestId, "stream_end");
+    res.end();
+  } catch (error) {
+    logChatFlow(requestId, "stream_error", error instanceof Error ? error.message : String(error));
+    console.error("Chat stream error:", error);
+
+    if (res.headersSent) {
+      res.write(formatSSEMessage({
+        event: "error",
+        data: {
+          code: "CHAT_ERROR",
+          message: error instanceof Error ? error.message : "An error occurred",
+        },
+      }));
+      res.end();
     } else {
-      await db.insert(conversations).values({
-        userId,
-        sessionId,
-        messages: newHistory as any,
-        lastPreferences: prefs as any,
+      res.status(500).json({
+        error: "Chat processing failed",
+        details: error instanceof Error ? error.message : String(error),
       });
     }
-    
-    // End the stream
-    res.end();
-    
-  } catch (error) {
-    console.error("Chat stream error:", error);
-    
-    // Send error event
-    res.write(formatSSEMessage({
-      event: "error",
-      data: {
-        code: "CHAT_ERROR",
-        message: error instanceof Error ? error.message : "An error occurred",
-      },
-    }));
-    res.end();
   }
 });
 
 // GET /api/chat/history - Get chat history
 chatRouter.get("/history", async (req, res) => {
   try {
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     
     if (!userId) {
-      return res.status(401).json({ error: "Missing x-user-id header" });
+      return res.status(401).json({ error: "Missing authorization" });
     }
     
     const [conversation] = await db
@@ -267,6 +251,7 @@ chatRouter.get("/history", async (req, res) => {
       return res.json({ messages: [], preferences: null });
     }
     
+
     res.json({
       messages: conversation.messages,
       preferences: conversation.lastPreferences,
@@ -282,10 +267,11 @@ chatRouter.get("/history", async (req, res) => {
  */
 chatRouter.get("/sessions", async (req, res) => {
   try {
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
 
     if (!userId) {
-      return res.status(401).json({ error: "Missing x-user-id header" });
+      return res.status(401).json({ error: "Missing authorization" });
     }
 
     const results = await db
@@ -294,14 +280,17 @@ chatRouter.get("/sessions", async (req, res) => {
       .where(eq(conversations.userId, userId))
       .orderBy(conversations.updatedAt);
 
-    const sessions = results.map((c) => ({
-      id: c.id,
-      sessionId: c.sessionId,
-      createdAt: c.createdAt,
-      updatedAt: c.updatedAt,
-      messageCount: (c.messages || []).length,
-      lastMessage: (c.messages?.length ?? 0) > 0 ? c.messages[c.messages.length - 1].content || "" : "",
-    }));
+    const sessions = results.map((c) => {
+      const messages = c.messages ?? [];
+      return {
+        id: c.id,
+        sessionId: c.sessionId,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        messageCount: messages.length,
+        lastMessage: messages.length > 0 ? messages[messages.length - 1].content || "" : "",
+      };
+    });
 
     res.json({ sessions });
   } catch (error) {
@@ -315,10 +304,11 @@ chatRouter.get("/sessions", async (req, res) => {
  */
 chatRouter.get("/sessions/:id", async (req, res) => {
   try {
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
 
     if (!userId) {
-      return res.status(401).json({ error: "Missing x-user-id header" });
+      return res.status(401).json({ error: "Missing authorization" });
     }
 
     const [conversation] = await db
@@ -330,6 +320,7 @@ chatRouter.get("/sessions/:id", async (req, res) => {
     if (!conversation) {
       return res.status(404).json({ error: "Session not found" });
     }
+
 
     res.json({ conversation });
   } catch (error) {
@@ -343,10 +334,11 @@ chatRouter.get("/sessions/:id", async (req, res) => {
  */
 chatRouter.delete("/sessions/:id", async (req, res) => {
   try {
-    const userId = req.headers["x-user-id"] as string;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
 
     if (!userId) {
-      return res.status(401).json({ error: "Missing x-user-id header" });
+      return res.status(401).json({ error: "Missing authorization" });
     }
 
     const [conversation] = await db
@@ -366,3 +358,12 @@ chatRouter.delete("/sessions/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to delete chat session" });
   }
 });
+
+
+
+
+
+
+
+
+

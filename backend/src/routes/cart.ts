@@ -4,6 +4,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AddCartItemSchema, UpdateCartItemSchema } from "../types/api.js";
 import { defaultRateLimit } from "../middleware/rateLimit.js";
+import { resolveRequestIdentity } from "../middleware/supabaseAuth.js";
 
 export const cartRouter = Router();
 
@@ -78,7 +79,8 @@ async function getCartForAuth(userId?: string | null, sessionId?: string | null)
 // GET /api/cart
 cartRouter.get("/", async (req, res) => {
   try {
-    const userId = req.header("x-user-id") || null;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     const sessionId = (req.query.sessionId as string | undefined) || null;
 
     if (!userId && !sessionId) {
@@ -96,11 +98,12 @@ cartRouter.get("/", async (req, res) => {
 // POST /api/cart/items
 cartRouter.post("/items", async (req, res) => {
   try {
-    const userId = req.header("x-user-id") || null;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     const sessionId = (req.query.sessionId as string | undefined) || null;
 
     if (!userId && !sessionId) {
-      return res.status(401).json({ error: "Missing x-user-id header or sessionId query param" });
+      return res.status(401).json({ error: "Missing authorization or sessionId query param" });
     }
 
     const body = AddCartItemSchema.parse(req.body);
@@ -172,11 +175,12 @@ cartRouter.post("/items", async (req, res) => {
 // PUT /api/cart/items/:itemId
 cartRouter.put("/items/:itemId", async (req, res) => {
   try {
-    const userId = req.header("x-user-id") || null;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     const sessionId = (req.query.sessionId as string | undefined) || null;
 
     if (!userId && !sessionId) {
-      return res.status(401).json({ error: "Missing x-user-id header or sessionId query param" });
+      return res.status(401).json({ error: "Missing authorization or sessionId query param" });
     }
 
     const body = UpdateCartItemSchema.parse(req.body);
@@ -212,11 +216,12 @@ cartRouter.put("/items/:itemId", async (req, res) => {
 // DELETE /api/cart/items/:itemId
 cartRouter.delete("/items/:itemId", async (req, res) => {
   try {
-    const userId = req.header("x-user-id") || null;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId;
     const sessionId = (req.query.sessionId as string | undefined) || null;
 
     if (!userId && !sessionId) {
-      return res.status(401).json({ error: "Missing x-user-id header or sessionId query param" });
+      return res.status(401).json({ error: "Missing authorization or sessionId query param" });
     }
 
     const cart = await findCart(userId, sessionId);

@@ -7,18 +7,31 @@
  */
 
 import { useState, useCallback } from "react";
-import { apiClient } from "@/lib/api-client";
+
+const UPLOAD_API_BASE = "http://localhost:3000/api/upload";
+
+async function postUpload(path, body) {
+  const response = await fetch(`${UPLOAD_API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.error || data.message || `Upload failed with status ${response.status}`);
+  }
+
+  return data;
+}
 
 export function useUpload() {
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState(null);
 
-  /**
-   * Upload an image file to Supabase via backend
-   * @param {File} file - The image file to upload
-   * @param {string} [folder='uploads'] - Folder path in Supabase storage
-   * @returns {Promise<string>} The public URL of the uploaded image
-   */
   const upload = useCallback(async (file, folder = "uploads") => {
     if (!file) {
       throw new Error("No file provided");
@@ -32,19 +45,15 @@ export function useUpload() {
     setError(null);
 
     try {
-      // Read file as base64
       const base64 = await readFileAsBase64(file);
-
-      // Send to backend which uploads to Supabase
-      const response = await apiClient.post("/upload/image", {
+      const response = await postUpload("/image", {
         imageData: base64,
         folder,
         contentType: file.type,
       });
-
       return response.url;
     } catch (err) {
-      const message = err.response?.data?.error || err.message || "Upload failed";
+      const message = err?.message || "Upload failed";
       setError(message);
       throw new Error(message);
     } finally {
@@ -52,12 +61,6 @@ export function useUpload() {
     }
   }, []);
 
-  /**
-   * Upload from a URL (proxy to Supabase)
-   * @param {string} url - The external URL to upload from
-   * @param {string} [folder='uploads'] - Folder path in Supabase storage
-   * @returns {Promise<string>} The public URL of the uploaded image
-   */
   const uploadFromUrl = useCallback(async (url, folder = "uploads") => {
     if (!url) {
       throw new Error("No URL provided");
@@ -67,14 +70,10 @@ export function useUpload() {
     setError(null);
 
     try {
-      const response = await apiClient.post("/upload/from-url", {
-        url,
-        folder,
-      });
-
+      const response = await postUpload("/from-url", { url, folder });
       return response.url;
     } catch (err) {
-      const message = err.response?.data?.error || err.message || "Upload failed";
+      const message = err?.message || "Upload failed";
       setError(message);
       throw new Error(message);
     } finally {
@@ -82,12 +81,6 @@ export function useUpload() {
     }
   }, []);
 
-  /**
-   * Upload a selfie for the current user
-   * @param {File|string} image - File or URL
-   * @param {string} userId - User ID
-   * @returns {Promise<{selfieId: string, imageUrl: string}>}
-   */
   const uploadSelfie = useCallback(async (image, userId) => {
     setIsUploading(true);
     setError(null);
@@ -96,28 +89,33 @@ export function useUpload() {
       let imageUrl;
 
       if (typeof image === "string") {
-        // It's a URL, use it directly
         imageUrl = image;
       } else if (image instanceof File) {
-        // It's a file, upload it
         imageUrl = await upload(image, `selfies/${userId}`);
       } else {
         throw new Error("Invalid image source");
       }
 
-      // Register selfie in backend
-      const response = await apiClient.post(
-        "/upload/selfie",
-        { imageUrl },
-        { headers: { "x-user-id": userId } }
-      );
+      const response = await fetch(`${UPLOAD_API_BASE}/selfie`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": userId,
+        },
+        body: JSON.stringify({ imageUrl }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || data.message || `Upload failed with status ${response.status}`);
+      }
 
       return {
-        selfieId: response.selfieId,
-        imageUrl: response.imageUrl,
+        selfieId: data.selfieId,
+        imageUrl: data.imageUrl,
       };
     } catch (err) {
-      const message = err.response?.data?.error || err.message || "Upload failed";
+      const message = err?.message || "Upload failed";
       setError(message);
       throw new Error(message);
     } finally {
@@ -135,14 +133,10 @@ export function useUpload() {
   };
 }
 
-/**
- * Read a File as base64 string
- */
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      // Remove data URL prefix to get just the base64
       const base64 = reader.result.split(",")[1];
       resolve(base64);
     };

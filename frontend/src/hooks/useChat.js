@@ -2,6 +2,9 @@ import { useState, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient, createStream } from '@/lib/api-client';
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // Types for streaming events
 export const STREAM_EVENTS = {
   CONNECTED: 'connected',
@@ -51,9 +54,46 @@ export function useChatStream() {
   const assistantMessageIdRef = useRef(null);
 
   const getSession = useCallback(() => {
-    const stored = localStorage.getItem('somela_session');
-    return stored ? JSON.parse(stored) : null;
+    const stored = localStorage.getItem('opencommercelens_session');
+    if (!stored) return null;
+
+    const parsed = JSON.parse(stored);
+    return parsed?.data?.sessionId ? parsed.data : parsed;
   }, []);
+
+  const createGuestSession = useCallback(async (baseSession = null) => {
+    const response = await apiClient.post('/sessions', {
+      userId: baseSession?.userId,
+      isGuest: baseSession?.isGuest ?? true,
+    });
+
+    localStorage.setItem('opencommercelens_session', JSON.stringify(response));
+    return response;
+  }, []);
+
+  const ensureSession = useCallback(async () => {
+    const stored = getSession();
+
+    if (!stored) {
+      return createGuestSession();
+    }
+
+    if (stored.sessionId && UUID_REGEX.test(stored.sessionId)) {
+      return stored;
+    }
+
+    if (stored.sessionToken) {
+      try {
+        const response = await apiClient.get(`/sessions/${stored.sessionToken}`);
+        localStorage.setItem('opencommercelens_session', JSON.stringify(response));
+        return response;
+      } catch (error) {
+        console.warn('Failed to refresh stale chat session, creating a new one', error);
+      }
+    }
+
+    return createGuestSession(stored);
+  }, [createGuestSession, getSession]);
 
   const handleUIPayload = useCallback((payload) => {
     if (!payload || !payload.type) return;
@@ -62,12 +102,14 @@ export function useChatStream() {
       case UI_TYPES.REPLACE_CATALOG:
         if (payload.products) {
           setProducts(payload.products);
+          updateAssistantMessageProducts(payload.products);
         }
         break;
 
       case UI_TYPES.SHOW_PRODUCT:
         if (payload.product) {
           setProducts([payload.product]);
+          updateAssistantMessageProducts([payload.product]);
         }
         break;
 
@@ -112,32 +154,41 @@ export function useChatStream() {
     }
   }, []);
 
+  const upsertAssistantMessage = useCallback((patch) => {
+    setMessages((prev) => {
+      const id = assistantMessageIdRef.current || `assistant-${Date.now()}`;
+      const existing = prev.find((m) => m.id === id);
+
+      if (existing) {
+        return prev.map((m) => (m.id === id ? { ...m, ...patch } : m));
+      }
+
+      assistantMessageIdRef.current = id;
+      return [
+        ...prev,
+        {
+          id,
+          role: MESSAGE_TYPES.ASSISTANT,
+          content: assistantContentRef.current,
+          ...patch,
+        },
+      ];
+    });
+  }, []);
+
   const updateAssistantMessage = useCallback((content) => {
     assistantContentRef.current = content;
     setCurrentReply(content);
     
-    setMessages((prev) => {
-      const id = assistantMessageIdRef.current;
-      const existing = prev.find((m) => m.id === id);
-      if (existing) {
-        return prev.map((m) =>
-          m.id === id ? { ...m, content } : m
-        );
-      } else {
-        // Create the message if it doesn't exist
-        const newMsg = {
-          id: id || `assistant-${Date.now()}`,
-          role: MESSAGE_TYPES.ASSISTANT,
-          content,
-        };
-        if (id) assistantMessageIdRef.current = newMsg.id;
-        return [...prev, newMsg];
-      }
-    });
-  }, []);
+    upsertAssistantMessage({ content });
+  }, [upsertAssistantMessage]);
+
+  const updateAssistantMessageProducts = useCallback((nextProducts) => {
+    upsertAssistantMessage({ products: nextProducts });
+  }, [upsertAssistantMessage]);
 
   const sendMessage = useCallback(async (message, imageUrl = null) => {
-    const session = getSession();
+    const session = await ensureSession();
     if (!session) {
       setError('No session available');
       return;
@@ -163,30 +214,39 @@ export function useChatStream() {
     assistantMessageIdRef.current = assistantMessageId;
 
     try {
+      const requestBody = {
+        sessionId: session.sessionId,
+        userId: session.userId,
+        message: message,
+      };
+
+      if (imageUrl) {
+        requestBody.imageUrl = imageUrl;
+      }
+
       await createStream(
         '/chat/stream',
-        {
-          sessionId: session.sessionId,
-          userId: session.userId,
-          message: message,
-          imageUrl: imageUrl,
-        },
+        requestBody,
         // onMessage
         (eventType, data) => {
           switch (eventType) {
             case STREAM_EVENTS.TEXT:
+              console.log('Received text chunk:', data);
               updateAssistantMessage(assistantContentRef.current + data);
               break;
 
             case STREAM_EVENTS.UI_PAYLOAD:
+              console.log('Received UI payload:', data);
               handleUIPayload(data);
               break;
 
             case STREAM_EVENTS.UI_ACTION:
+              console.log('Received UI action:', data);
               setActions((prev) => [...prev, data]);
               break;
 
             case STREAM_EVENTS.ERROR:
+              console.log('Received error event:', data);
               setError(data.message || 'An error occurred');
               break;
 
@@ -216,9 +276,10 @@ export function useChatStream() {
       setError(err.message || 'Failed to send message');
       setIsStreaming(false);
     }
-  }, [getSession, handleUIPayload, updateAssistantMessage]);
+  }, [ensureSession, handleUIPayload, updateAssistantMessage]);
 
-  const clearMessages = useCallback(() => {
+  const clearMessages = useCallback(async () => {
+    await createGuestSession(getSession());
     setMessages([]);
     setCurrentReply('');
     setProducts([]);
@@ -226,7 +287,11 @@ export function useChatStream() {
     setError(null);
     assistantContentRef.current = '';
     assistantMessageIdRef.current = null;
-  }, []);
+  }, [createGuestSession, getSession]);
+
+  const startNewSession = useCallback(async () => {
+    await clearMessages();
+  }, [clearMessages]);
 
   const abort = useCallback(() => {
     if (abortControllerRef.current) {
@@ -244,6 +309,7 @@ export function useChatStream() {
     actions,
     sendMessage,
     clearMessages,
+    startNewSession,
     abort,
   };
 }
@@ -253,8 +319,11 @@ export function useChatStream() {
  */
 export function useChatHistory() {
   const getSession = useCallback(() => {
-    const stored = localStorage.getItem('somela_session');
-    return stored ? JSON.parse(stored) : null;
+    const stored = localStorage.getItem('opencommercelens_session');
+    if (!stored) return null;
+
+    const parsed = JSON.parse(stored);
+    return parsed?.data?.sessionId ? parsed.data : parsed;
   }, []);
 
   return useQuery({
@@ -343,3 +412,7 @@ export function useVisualSearch() {
 }
 
 export default useChatStream;
+
+
+
+

@@ -3,7 +3,7 @@
 ## Quick Deploy
 
 ```bash
-cd /workspace/project/somela
+cd /workspace/project/opencommercelens
 python deploy_aliyun.py
 ```
 
@@ -21,7 +21,7 @@ python deploy_aliyun.py
 
 | Component | Service | URL |
 |-----------|---------|-----|
-| Frontend | OSS (Object Storage) | `https://somela-frontend.oss-{region}.aliyuncs.com` |
+| Frontend | OSS (Object Storage) | `https://opencommercelens-frontend.oss-{region}.aliyuncs.com` |
 
 ## Manual Setup Required
 
@@ -30,7 +30,7 @@ python deploy_aliyun.py
 The deployment script may not have permissions to make the bucket public. Do this manually:
 
 1. Go to [OSS Console](https://oss.console.aliyun.com)
-2. Select bucket `somela-frontend`
+2. Select bucket `opencommercelens-frontend`
 3. **Basic Settings** → **Block Public Access** → Disable
 4. **Access Control** → **ACL** → Set to **Public Read**
 
@@ -75,7 +75,7 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt-get install -y nodejs
 
 # Clone and deploy
-cd /opt/somela
+cd /opt/opencommercelens
 git pull origin main
 cd backend && npm install && npm start
 ```
@@ -99,7 +99,7 @@ cd backend && s deploy
 # docker-compose.yml
 services:
   api:
-    image: your-registry/somela-backend:latest
+    image: your-registry/opencommercelens-backend:latest
     ports:
       - "3000:3000"
     environment:
@@ -119,7 +119,7 @@ YOUCAM_API_KEY=sk-...
 OPENROUTER_API_KEY=sk-or-...
 
 # Frontend URL (for CORS)
-FRONTEND_URL=https://somela-frontend.oss-ap-southeast-1.aliyuncs.com
+FRONTEND_URL=https://opencommercelens-frontend.oss-ap-southeast-1.aliyuncs.com
 ```
 
 ## CDN Setup (Optional)
@@ -127,7 +127,7 @@ FRONTEND_URL=https://somela-frontend.oss-ap-southeast-1.aliyuncs.com
 For better performance, add Alibaba Cloud CDN:
 
 1. CDN Console → Add Domain
-2. Origin: `somela-frontend.oss-ap-southeast-1.aliyuncs.com`
+2. Origin: `opencommercelens-frontend.oss-ap-southeast-1.aliyuncs.com`
 3. Configure CNAME in DNS
 
 ## Troubleshooting
@@ -157,3 +157,4 @@ cd backend && npm install
 - `deploy_aliyun.py` - Deployment script
 - `backend/.env` - Environment variables
 - `frontend/dist/` - Built frontend (deploys to OSS)
+

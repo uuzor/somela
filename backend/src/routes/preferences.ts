@@ -1,45 +1,44 @@
 import { Router } from "express";
-import { db, userPreferences, sessions } from "../db/index.js";
-import { eq, and } from "drizzle-orm";
+import { db, userPreferences } from "../db/index.js";
+import { eq } from "drizzle-orm";
 import { UserPreferencesUpdateSchema } from "../types/api.js";
+import { requireSupabaseUser } from "../middleware/supabaseAuth.js";
 
 export const preferencesRouter = Router();
 
-// Middleware to extract userId from session
-async function getUserIdFromSession(req: any, res: any) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Missing authorization" });
-    return null;
-  }
-  
-  const token = authHeader.slice(7);
-  const [session] = await db
-    .select()
-    .from(sessions)
-    .where(eq(sessions.sessionToken, token))
-    .limit(1);
-  
-  if (!session) {
-    res.status(401).json({ error: "Invalid session" });
-    return null;
-  }
-  
-  return session.userId;
+function formatPreferences(prefs: any) {
+  return {
+    category: prefs?.category ?? null,
+    colors: prefs?.preferredColors || [],
+    maxPrice: prefs?.maxPrice ? parseFloat(String(prefs.maxPrice)) : null,
+    minPrice: prefs?.minPrice ? parseFloat(String(prefs.minPrice)) : null,
+    styles: prefs?.preferredStyles || [],
+    sizes: prefs?.sizes || [],
+  };
+}
+
+function buildPreferenceRecord(updates: any, existing?: any) {
+  return {
+    category: updates.category !== undefined ? updates.category : existing?.category ?? null,
+    preferredColors: updates.color !== undefined ? [updates.color] : existing?.preferredColors || [],
+    preferredStyles: updates.style !== undefined ? updates.style : existing?.preferredStyles || [],
+    maxPrice: updates.maxPrice !== undefined ? String(updates.maxPrice) : existing?.maxPrice ?? null,
+    minPrice: updates.minPrice !== undefined ? String(updates.minPrice) : existing?.minPrice ?? null,
+    sizes: updates.size !== undefined ? [updates.size] : existing?.sizes || [],
+  };
 }
 
 // GET /api/preferences - Get current user preferences
 preferencesRouter.get("/", async (req, res) => {
   try {
-    const userId = await getUserIdFromSession(req, res);
-    if (!userId) return;
-    
+    const user = await requireSupabaseUser(req);
+
     const [prefs] = await db
       .select()
       .from(userPreferences)
-      .where(eq(userPreferences.userId, userId))
+      .where(eq(userPreferences.userId, user.id))
       .limit(1);
-    
+
     if (!prefs) {
       return res.json({
         category: null,
@@ -50,100 +49,71 @@ preferencesRouter.get("/", async (req, res) => {
         sizes: [],
       });
     }
-    
-    res.json({
-      category: prefs.category,
-      colors: prefs.preferredColors || [],
-      maxPrice: prefs.maxPrice ? parseFloat(String(prefs.maxPrice)) : null,
-      minPrice: prefs.minPrice ? parseFloat(String(prefs.minPrice)) : null,
-      styles: prefs.preferredStyles || [],
-      sizes: prefs.sizes || [],
-    });
+
+    res.json(formatPreferences(prefs));
   } catch (error) {
+    const status = (error as any)?.status || 500;
     console.error("Preferences fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch preferences" });
+    res.status(status).json({ error: status === 401 ? "Missing authorization" : "Failed to fetch preferences" });
   }
 });
 
 // PUT /api/preferences - Update user preferences
 preferencesRouter.put("/", async (req, res) => {
   try {
-    const userId = await getUserIdFromSession(req, res);
-    if (!userId) return;
-    
+    const user = await requireSupabaseUser(req);
     const updates = UserPreferencesUpdateSchema.parse(req.body);
-    
-    // Convert numeric fields to strings for DB storage
-    const dbUpdates = {
-      ...updates,
-      maxPrice: updates.maxPrice !== undefined ? String(updates.maxPrice) : undefined,
-      minPrice: updates.minPrice !== undefined ? String(updates.minPrice) : undefined,
-    };
-    
-    // Check if preferences exist
+
     const [existing] = await db
       .select()
       .from(userPreferences)
-      .where(eq(userPreferences.userId, userId))
+      .where(eq(userPreferences.userId, user.id))
       .limit(1);
-    
+
+    const record = buildPreferenceRecord(updates, existing);
+
     if (existing) {
-      // Update existing
       const [updated] = await db
         .update(userPreferences)
         .set({
-          ...dbUpdates,
+          ...record,
           updatedAt: new Date(),
         })
-        .where(eq(userPreferences.userId, userId))
+        .where(eq(userPreferences.userId, user.id))
         .returning();
-      
-      res.json({
-        category: updated.category,
-        colors: updated.preferredColors || [],
-        maxPrice: updated.maxPrice ? parseFloat(String(updated.maxPrice)) : null,
-        minPrice: updated.minPrice ? parseFloat(String(updated.minPrice)) : null,
-        styles: updated.preferredStyles || [],
-        sizes: updated.sizes || [],
-      });
-    } else {
-      // Create new
-      const [created] = await db
-        .insert(userPreferences)
-        .values({
-          userId,
-          ...dbUpdates,
-        })
-        .returning();
-      
-      res.json({
-        category: created.category,
-        colors: created.preferredColors || [],
-        maxPrice: created.maxPrice ? parseFloat(String(created.maxPrice)) : null,
-        minPrice: created.minPrice ? parseFloat(String(created.minPrice)) : null,
-        styles: created.preferredStyles || [],
-        sizes: created.sizes || [],
-      });
+
+      return res.json(formatPreferences(updated));
     }
+
+    const [created] = await db
+      .insert(userPreferences)
+      .values({
+        userId: user.id,
+        ...record,
+      })
+      .returning();
+
+    res.json(formatPreferences(created));
   } catch (error) {
+    const status = (error as any)?.status || 400;
     console.error("Preferences update error:", error);
-    res.status(400).json({ error: "Invalid preferences", details: error });
+    res.status(status).json({ error: status === 401 ? "Missing authorization" : "Invalid preferences", details: error });
   }
 });
 
 // DELETE /api/preferences - Clear user preferences
 preferencesRouter.delete("/", async (req, res) => {
   try {
-    const userId = await getUserIdFromSession(req, res);
-    if (!userId) return;
-    
+    const user = await requireSupabaseUser(req);
+
     await db
       .delete(userPreferences)
-      .where(eq(userPreferences.userId, userId));
-    
+      .where(eq(userPreferences.userId, user.id));
+
     res.status(204).send();
   } catch (error) {
+    const status = (error as any)?.status || 500;
     console.error("Preferences delete error:", error);
-    res.status(500).json({ error: "Failed to delete preferences" });
+    res.status(status).json({ error: status === 401 ? "Missing authorization" : "Failed to delete preferences" });
   }
 });

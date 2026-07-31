@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Shopping Agent Service
  * 
  * Implements an OpenAI-compatible agent loop with tools for:
@@ -32,10 +32,14 @@ import {
   formatSSEMessage,
   type StreamingEvent,
   type ChatMessage,
+  type ChatState,
 } from "./validation.js";
 
 // Re-export validated types
-export type { ProductCard, UIPayload, UIAction, ShoppingState, CatalogFilters, AgentResponse } from "./validation.js";
+export type { ProductCard, UIPayload, UIAction, StreamingEvent, ChatMessage, ChatState } from "./validation.js";
+export type ShoppingState = ValidatedShoppingState;
+export type CatalogFilters = ValidatedCatalogFilters;
+export type AgentResponse = ValidatedAgentResponse;
 
 // ============================================================================
 // Configuration
@@ -44,6 +48,7 @@ export type { ProductCard, UIPayload, UIAction, ShoppingState, CatalogFilters, A
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY;
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://openrouter.ai/api/v1";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "openai/gpt-4o";
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 120000);
 
 // ============================================================================
 // OpenAI Client
@@ -52,13 +57,14 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "openai/gpt-4o";
 const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
   baseURL: OPENAI_BASE_URL,
+  timeout: OPENAI_TIMEOUT_MS,
 });
 
 // ============================================================================
 // Types (for internal use)
 // ============================================================================
 
-interface AgentMessage {
+export interface AgentMessage {
   role: "user" | "assistant" | "tool";
   content: string;
   tool_calls?: Array<{
@@ -90,6 +96,59 @@ const DEFAULT_UI_PAYLOAD: UIPayload = {
 };
 
 const DEFAULT_ACTIONS: UIAction[] = [];
+const DEFAULT_CHAT_STATE: ChatState = "chat";
+
+function createChatStateEvent(
+  state: ChatState,
+  reason?: string,
+  meta: { hasProducts?: boolean; productCount?: number; requiresInput?: boolean } = {},
+): StreamingEvent {
+  return {
+    event: "ui_state",
+    data: {
+      state,
+      reason,
+      ...meta,
+    },
+  } as StreamingEvent;
+}
+
+function deriveChatState(
+  uiPayload: UIPayload,
+  assistantMessage: string,
+  toolNames: Set<string>,
+): ChatState {
+  if (uiPayload.type === "replace_catalog" && uiPayload.products.length > 0) {
+    return "show_catalog";
+  }
+
+  if (uiPayload.type === "show_product") {
+    return "show_product";
+  }
+
+  if (uiPayload.type === "suggest_try_on" || toolNames.has("initiate_try_on")) {
+    return "tryon";
+  }
+
+  if (uiPayload.type === "confirm_purchase" || uiPayload.type === "payment_pending" || toolNames.has("prepare_purchase") || toolNames.has("execute_prava_checkout")) {
+    return toolNames.has("execute_prava_checkout") ? "processing" : "checkout";
+  }
+
+  if (uiPayload.type === "order_confirmed") {
+    return "confirmation";
+  }
+
+  const trimmed = assistantMessage.trim();
+  if (trimmed.endsWith("?") || /\b(what kind|which one|which style|how many|what color|what size|do you want|can you clarify)\b/i.test(trimmed)) {
+    return "clarify";
+  }
+
+  if (toolNames.has("search_catalog")) {
+    return "chat";
+  }
+
+  return "chat";
+}
 
 // ============================================================================
 // Agent Tools
@@ -779,7 +838,7 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
 // System Prompt
 // ============================================================================
 
-const SYSTEM_PROMPT = `You are a helpful clothing-shopping agent for Somela.
+const SYSTEM_PROMPT = `You are a helpful clothing-shopping agent for OpenCommerceLens.
 
 Help users discover, compare, try on and purchase clothes from our curated collection.
 
@@ -843,6 +902,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResponse>
   let finalReply = "";
   let actions: UIAction[] = [];
   let uiPayload: UIPayload = DEFAULT_UI_PAYLOAD;
+  let chatState: ChatState = DEFAULT_CHAT_STATE;
 
   // Streaming callback that collects final state
   const collectEvent = (event: StreamingEvent) => {
@@ -852,6 +912,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResponse>
       actions.push(event.data);
     } else if (event.event === "ui_payload") {
       uiPayload = event.data;
+    } else if (event.event === "ui_state") {
+      chatState = event.data.state;
     }
   };
 
@@ -865,6 +927,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResponse>
     actions: actions.slice(0, 10), // Limit actions
     conversationId: options.sessionId,
     messages,
+    chatState,
+    updatedState: { chatState },
   };
 }
 
@@ -912,28 +976,44 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
   }
   messages.push({ role: "user", content: userContent });
 
+  let chatState: ChatState = DEFAULT_CHAT_STATE;
+  const toolNamesUsed = new Set<string>();
+  const emitChatState = (nextState: ChatState, reason?: string, meta: { hasProducts?: boolean; productCount?: number; requiresInput?: boolean } = {}) => {
+    if (chatState === nextState && !reason) {
+      return;
+    }
+    chatState = nextState;
+    onEvent(createChatStateEvent(nextState, reason, meta));
+  };
+
   // If imageUrl is provided, perform visual search first and include results
   let visualSearchResults = null;
-  if (imageUrl && isVectorSearchAvailable()) {
+  onEvent(createChatStateEvent(chatState, "conversation_started", { requiresInput: true }));
+  if (imageUrl) {
     try {
-      const { vectorSearchProducts } = await import("./vector.js");
       visualSearchResults = await vectorSearchProducts({ imageUrl }, 12);
       
       // Send visual search results as an event
+      const visualProducts = visualSearchResults.map((r) => ({
+        productId: r.productId,
+        title: r.title,
+        images: r.images || [],
+        minPrice: r.minPrice,
+        maxPrice: r.maxPrice,
+        category: r.category,
+        url: r.url,
+      }));
       onEvent({
         event: "ui_payload",
         data: {
           type: "replace_catalog",
-          products: visualSearchResults.map((r) => ({
-            productId: r.productId,
-            title: r.title,
-            images: r.images || [],
-            minPrice: r.minPrice,
-            maxPrice: r.maxPrice,
-            category: r.category,
-            url: r.url,
-          })),
+          products: visualProducts,
         },
+      });
+      emitChatState("show_catalog", "visual_search_results", {
+        hasProducts: visualProducts.length > 0,
+        productCount: visualProducts.length,
+        requiresInput: false,
       });
     } catch (error) {
       console.error("Visual search failed:", error);
@@ -974,6 +1054,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
   // Agent loop (max 8 iterations)
   for (let turn = 0; turn < 8; turn++) {
     try {
+      toolResults = [];
       const response = await openai.chat.completions.create({
         model: OPENAI_MODEL,
         messages,
@@ -997,6 +1078,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
         for (const toolCall of toolCalls) {
           const toolName = toolCall.function?.name || toolCall.name;
           const args = JSON.parse(toolCall.function?.arguments || "{}");
+          toolNamesUsed.add(toolName);
           
           // Stream tool call event
           onEvent({
@@ -1030,6 +1112,11 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
                   products: validProducts.slice(0, 12),
                 };
                 onEvent({ event: "ui_payload", data: uiPayload });
+                emitChatState("show_catalog", "search_results", {
+                  hasProducts: validProducts.length > 0,
+                  productCount: validProducts.length,
+                  requiresInput: false,
+                });
               } else if (toolName === "suggest_try_on" && result.suggestion) {
                 const action: UIAction = {
                   type: "suggest_try_on",
@@ -1037,6 +1124,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
                 };
                 actions.push(action);
                 onEvent({ event: "ui_action", data: action });
+                emitChatState("tryon", "try_on_suggested", { requiresInput: true });
               } else if (toolName === "prepare_purchase" && result.purchaseIntentId) {
                 // Validate purchase summary
                 const purchase = {
@@ -1056,6 +1144,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
                   purchase,
                 };
                 onEvent({ event: "ui_payload", data: uiPayload });
+                emitChatState("checkout", "purchase_prepared", { requiresInput: true });
               }
 
               toolResults.push({
@@ -1106,6 +1195,17 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
     }
   }
 
+  const derivedState = deriveChatState(uiPayload, assistantMessage, toolNamesUsed);
+  emitChatState(
+    derivedState,
+    "final_state_determined",
+    {
+      hasProducts: uiPayload.type === "replace_catalog" ? uiPayload.products.length > 0 : undefined,
+      productCount: uiPayload.type === "replace_catalog" ? uiPayload.products.length : undefined,
+      requiresInput: derivedState === "clarify" || derivedState === "chat",
+    },
+  );
+
    // Send final event with complete response
   onEvent({
     event: "done",
@@ -1114,6 +1214,7 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
       uiPayload: safeValidateUIPayload(uiPayload),
       actions: actions.slice(0, 10),
       messages: messages as any,
+      chatState: derivedState,
     },
   });
 
@@ -1130,3 +1231,9 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
 export function isAgentAvailable(): boolean {
   return !!OPENAI_API_KEY;
 }
+
+
+
+
+
+

@@ -29,7 +29,7 @@ export default function FilterSidebar({ filters = {}, setFilters }) {
   useEffect(() => {
     async function fetchCategories() {
       try {
-        const res = await fetch(`${import.meta.env.VITE_API_URL || "http://localhost:3000"}/catalog?limit=1`);
+        const res = await fetch(`${import.meta.env.VITE_API_URL || "/api"}/catalog?limit=1`);
         const data = await res.json();
         // Update category counts if available
         if (data.categories) {

@@ -1,4 +1,4 @@
-# Somela Frontend
+# OpenCommerceLens Frontend
 
 AI-powered visual shopping agent for fashion. Users can upload photos, find similar outfits, chat with an AI agent, and virtually try on clothes.
 
@@ -40,3 +40,4 @@ The frontend proxies `/api` requests to the backend server (default: `http://loc
 - `src/lib/api-client.js` - Axios API client
 - `src/hooks/useChat.js` - Chat React Query hooks
 - `src/components/chat/` - Chat UI components
+

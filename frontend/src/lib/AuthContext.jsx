@@ -1,6 +1,8 @@
 import React, { createContext, useState, useContext, useEffect, useCallback } from 'react';
 import { apiClient } from '@/lib/api-client';
 
+const normalizeSession = (sessionLike) => sessionLike?.data?.sessionId ? sessionLike.data : sessionLike;
+
 const AuthContext = createContext();
 
 export const AuthProvider = ({ children }) => {
@@ -21,10 +23,10 @@ export const AuthProvider = ({ children }) => {
     try {
       setIsLoadingAuth(true);
       // Check for existing session in localStorage
-      const storedSession = localStorage.getItem('somela_session');
+      const storedSession = localStorage.getItem('opencommercelens_session');
       
       if (storedSession) {
-        const sessionData = JSON.parse(storedSession);
+        const sessionData = normalizeSession(JSON.parse(storedSession));
         // Verify session is still valid
         const response = await apiClient.get(`/sessions/${sessionData.sessionToken}`);
         setSession(response);
@@ -34,7 +36,7 @@ export const AuthProvider = ({ children }) => {
         // Create a new guest session
         const response = await apiClient.post('/sessions', { isGuest: true });
         setSession(response);
-        localStorage.setItem('somela_session', JSON.stringify(response));
+        localStorage.setItem('opencommercelens_session', JSON.stringify(response));
         setIsAuthenticated(true);
       }
       setAuthChecked(true);
@@ -48,7 +50,7 @@ export const AuthProvider = ({ children }) => {
       try {
         const response = await apiClient.post('/sessions', { isGuest: true });
         setSession(response);
-        localStorage.setItem('somela_session', JSON.stringify(response));
+        localStorage.setItem('opencommercelens_session', JSON.stringify(response));
         setIsAuthenticated(true);
         setAuthChecked(true);
       } catch (e) {
@@ -66,7 +68,7 @@ export const AuthProvider = ({ children }) => {
     setUser(null);
     setSession(null);
     setIsAuthenticated(false);
-    localStorage.removeItem('somela_session');
+    localStorage.removeItem('opencommercelens_session');
   }, [session]);
 
   const login = useCallback(async (userData) => {
@@ -104,3 +106,5 @@ export const useAuth = () => {
   }
   return context;
 };
+
+

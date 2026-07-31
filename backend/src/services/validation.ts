@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Validation Schemas for AI-Generated Data
  * 
  * Since AI can return inconsistent data, all responses must be validated
@@ -28,6 +28,48 @@ export const ProductCardSchema = z.object({
 });
 
 export type ProductCard = z.infer<typeof ProductCardSchema>;
+
+export interface CatalogFilters {
+  query?: string;
+  category?: string;
+  color?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  store?: string;
+  limit?: number;
+}
+
+export interface ShoppingState {
+  activeFilters: CatalogFilters;
+  visibleProductIds: string[];
+  focusedProductId?: string;
+  activeTryOnId?: string;
+  purchaseIntentId?: string;
+}
+
+export const ChatStateSchema = z.enum([
+  "chat",
+  "clarify",
+  "show_catalog",
+  "show_product",
+  "comparison",
+  "tryon",
+  "checkout",
+  "processing",
+  "confirmation",
+]);
+
+export type ChatState = z.infer<typeof ChatStateSchema>;
+
+export const ChatStateEventSchema = z.object({
+  state: ChatStateSchema,
+  reason: z.string().optional(),
+  hasProducts: z.boolean().optional(),
+  productCount: z.number().int().nonnegative().optional(),
+  requiresInput: z.boolean().optional(),
+});
+
+export type ChatStateEvent = z.infer<typeof ChatStateEventSchema>;
 
 export const VariantInfoSchema = z.object({
   variantId: z.string(),
@@ -170,6 +212,7 @@ export const AgentResponseSchema = z.object({
   actions: z.array(UIActionSchema).default([]),
   conversationId: z.string(),
   messages: z.array(ChatMessageSchema),
+  chatState: ChatStateSchema.default("chat"),
   updatedState: z.record(z.unknown()).optional(),
 });
 
@@ -334,6 +377,15 @@ export function safeValidateToolResult<T>(
 
 export const StreamingEventSchema = z.discriminatedUnion("event", [
   z.object({
+    event: z.literal("connected"),
+    data: z.object({
+      sessionId: z.string(),
+      conversationId: z.string(),
+      hasImage: z.boolean(),
+      state: ChatStateSchema,
+    }),
+  }),
+  z.object({
     event: z.literal("text"),
     data: z.string(),
   }),
@@ -356,6 +408,10 @@ export const StreamingEventSchema = z.discriminatedUnion("event", [
     data: UIActionSchema,
   }),
   z.object({
+    event: z.literal("ui_state"),
+    data: ChatStateEventSchema,
+  }),
+  z.object({
     event: z.literal("ui_payload"),
     data: UIPayloadSchema,
   }),
@@ -366,6 +422,7 @@ export const StreamingEventSchema = z.discriminatedUnion("event", [
       uiPayload: UIPayloadSchema,
       actions: z.array(UIActionSchema),
       messages: z.array(ChatMessageSchema),
+      chatState: ChatStateSchema,
     }),
   }),
   z.object({
@@ -391,3 +448,4 @@ export type SSEMessage = {
 export function formatSSEMessage(event: StreamingEvent): string {
   return `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`;
 }
+

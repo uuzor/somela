@@ -18,7 +18,7 @@ const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
 // Get session from localStorage
 function getSession() {
   try {
-    const stored = localStorage.getItem('somela_session');
+    const stored = localStorage.getItem('opencommercelens_session');
     return stored ? JSON.parse(stored) : null;
   } catch {
     return null;
@@ -259,3 +259,4 @@ export function useSelfies() {
 }
 
 export default useTryOn;
+

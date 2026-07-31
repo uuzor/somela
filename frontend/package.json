@@ -1,5 +1,5 @@
 {
-  "name": "somela-frontend",
+  "name": "opencommercelens-frontend",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -97,3 +97,4 @@
     "vite": "^6.1.0"
   }
 }
+
