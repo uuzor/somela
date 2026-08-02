@@ -200,6 +200,8 @@ export const userSelfies = pgTable("user_selfies", {
   imageUrl: text("image_url").notNull(),
   processedImageUrl: text("processed_image_url"), // After YouCam prep
   isDefault: boolean("is_default").default(false),
+  status: varchar("status", { length: 50 }).default("completed").notNull(),
+  errorMessage: text("error_message"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   userIdIdx: index("user_selfies_user_id_idx").on(table.userId),

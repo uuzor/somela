@@ -1,34 +1,42 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "fs";
 
-const TRYON_PATH = "./src/routes/tryon.ts";
+const route = readFileSync("./src/routes/tryon.ts", "utf-8");
+const service = readFileSync("./src/services/tryon.ts", "utf-8");
 
-describe("tryon.ts selfie implementation", () => {
-  it("imports processSelfie from youcam service", () => {
-    const content = readFileSync(TRYON_PATH, "utf-8");
-    expect(content).toContain("processSelfie");
-    expect(content).toContain('from "../services/youcam.js"');
+describe("try-on lifecycle", () => {
+  it("uses the shared asynchronous job service for single and multi try-on", () => {
+    expect(route).toContain("startTryOnJob");
+    expect(route).toContain('tryonRouter.post("/", tryonRateLimit');
+    expect(route).toContain('tryonRouter.post("/multi", tryonRateLimit');
+    expect(service).toContain("void processTryOnTask");
   });
 
-  it("triggers async selfie prep after storing selfie record", () => {
-    const content = readFileSync(TRYON_PATH, "utf-8");
-    expect(content).toContain("processSelfie(selfie.id, imageUrl, userId, apiKey)");
-    expect(content).toContain("isYouCamConfigured()");
+  it("limits outfit jobs to five products", () => {
+    expect(route).toContain(".min(1).max(5)");
+    expect(service).toContain("productIds.length > 5");
   });
 
-  it("does not contain TODO comment", () => {
-    const content = readFileSync(TRYON_PATH, "utf-8");
-    expect(content).not.toContain("TODO");
+  it("owner-scopes selfies and task status", () => {
+    expect(service).toContain("eq(userSelfies.userId, userId)");
+    expect(service).toContain("eq(tryonTasks.userId, userId)");
+    expect(route).toContain("getOwnedTryOnTask");
   });
 
-  it("returns processing status in selfie response", () => {
-    const content = readFileSync(TRYON_PATH, "utf-8");
-    expect(content).toContain('status: "processing"');
-    expect(content).toContain("processedImageUrl: null");
+  it("uses full-body classification for dresses", () => {
+    expect(service).toContain("/dress|gown|jumpsuit|romper|full.?body/");
+    expect(service).toContain('return "full_body"');
   });
 
-  it("getTaskStatus call includes taskType in GET handler", () => {
-    const content = readFileSync(TRYON_PATH, "utf-8");
-    expect(content).toContain('getTaskStatus(task.externalTaskId, "cloth-v3", apiKey)');
+  it("verifies webhook signatures and persists successful results", () => {
+    expect(route).toContain("verifyWebhookSignature");
+    expect(route).toContain("saveTryOnResult");
+    expect(route).toContain('status: "completed"');
+  });
+
+  it("returns explicit selfie lifecycle fields", () => {
+    expect(route).toContain("processedImageUrl");
+    expect(route).toContain("errorMessage");
+    expect(route).toContain("selfie.status");
   });
 });

@@ -16,7 +16,7 @@
  */
 
 import OpenAI from "openai";
-import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies, carts, cartItems, pravaPaymentSessions, pravaTransactions, shops } from "../db/index.js";
+import { db, products, productVariants, userPreferences, sessions, carts, cartItems, pravaPaymentSessions, pravaTransactions, shops } from "../db/index.js";
 import { createPravaPaymentSession, createPravaTransaction, updatePravaTransaction, getPravaRemotePaymentResult } from "../services/prava.js";
 import { hasSavedProductsOwner, listSavedProducts } from "../services/saved-products.js";
 import { sanitizePravaPaymentResult } from "../services/checkouts.js";
@@ -24,6 +24,7 @@ import { productSummarySelect } from "../db/product-select.js";
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { searchCatalog } from "./catalog-query.js";
 import { vectorSearchProducts } from "./vector.js";
+import { getOwnedTryOnTask, startTryOnJob } from "./tryon.js";
 import {
   type ProductCard,
   type UIPayload,
@@ -383,33 +384,17 @@ async function suggestTryOnTool(args: { productId: string; reason: string }) {
 /**
  * Initiate try-on (requires prior suggestion + user confirmation)
  */
-async function initiateTryOnTool(args: { productId: string; variantId?: string; userId: string; confirmationToken: string }) {
+async function initiateTryOnTool(args: { productId: string; variantId?: string; userId: string; sessionId?: string; confirmationToken: string }) {
   // Validate confirmation token (in production, verify against stored token)
   if (!args.confirmationToken) {
     return { error: "Confirmation required", requiresConfirmation: true };
   }
 
-  // Get user's selfie
-  const [selfie] = await db.select().from(userSelfies).where(eq(userSelfies.userId, args.userId)).limit(1);
-  
-  if (!selfie) {
-    return { error: "No selfie on file. Please upload a selfie first." };
-  }
-
-  // Get product image
-  const [product] = await db.select(productSummarySelect).from(products).where(eq(products.id, args.productId)).limit(1);
-  
-  if (!product || !product.images?.[0]) {
-    return { error: "Product image not available" };
-  }
-
-  // Create try-on task
-  const [task] = await db.insert(tryonTasks).values({
+  const task = await startTryOnJob({
     userId: args.userId,
-    garmentImageUrl: product.images[0],
-    userSelfieUrl: selfie.imageUrl,
-    status: "processing",
-  }).returning();
+    sessionId: args.sessionId,
+    productIds: [args.productId],
+  });
 
   return {
     success: true,
@@ -422,8 +407,8 @@ async function initiateTryOnTool(args: { productId: string; variantId?: string; 
 /**
  * Get try-on status (for async polling)
  */
-async function getTryOnStatusTool(args: { tryOnId: string }) {
-  const [task] = await db.select().from(tryonTasks).where(eq(tryonTasks.id, args.tryOnId)).limit(1);
+async function getTryOnStatusTool(args: { tryOnId: string; userId: string }) {
+  const task = await getOwnedTryOnTask(args.userId, args.tryOnId);
   
   if (!task) {
     return { error: "Try-on task not found" };
@@ -432,7 +417,7 @@ async function getTryOnStatusTool(args: { tryOnId: string }) {
   return {
     tryOnId: task.id,
     status: task.status,
-    resultUrl: task.resultImageUrl || null,
+    resultImageUrl: task.resultImageUrl || null,
     error: task.errorMessage || null,
   };
 }
@@ -1292,6 +1277,7 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
 
 const SYSTEM_PROMPT = `You are a helpful humorous clothing-shopping agent for OpenCommerceLens.
 You have to reply users in a conversational and concise manner, guiding them through the shopping experience.
+Make sure to try and know user gender, country, religion, state, style, size, color , budget preferences and other things that can help you recommend products from their question or sometimes you can ask them because it would not be wise to recommend demal cloths to male users.
 if they greet you,answer properly, greet them back with humour and ask how you can help.
 Help users discover, compare, try on and purchase clothes from our curated collection.
 Never ask the user for their user ID, login, or session ID. Identity is injected by the backend, and guest users should continue with the current session context.
@@ -1700,10 +1686,10 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
             data: { name: toolName, arguments: args },
           });
 
-          if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "prepare_purchase", "execute_prava_checkout", "add_to_cart", "view_cart", "view_saved_products", "update_cart_item", "remove_from_cart"].includes(toolName)) {
+          if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "get_try_on_status", "prepare_purchase", "execute_prava_checkout", "add_to_cart", "view_cart", "view_saved_products", "update_cart_item", "remove_from_cart"].includes(toolName)) {
             args.userId = userId;
           }
-          if (["prepare_purchase", "view_cart", "execute_prava_checkout"].includes(toolName)) {
+          if (["initiate_try_on", "prepare_purchase", "view_cart", "execute_prava_checkout"].includes(toolName)) {
             args.sessionId = sessionId;
           }
 

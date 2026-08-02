@@ -1,4 +1,4 @@
-import { Heart, ShoppingBag, LogOut } from 'lucide-react';
+import { Heart, ShoppingBag, LogOut, ReceiptText } from 'lucide-react';
 
 const items = [['discover', 'Discover'], ['results', 'Results'], ['tryon', 'Try-on'], ['checkout', 'Checkout']];
 
@@ -29,8 +29,10 @@ export default function TopNavigation({
   onLogout,
   cartCount = 0,
   savedCount = 0,
+  checkoutCount = 0,
   onOpenCart,
   onOpenSaved,
+  onOpenCheckouts,
 }) {
   const name = getDisplayName(user);
   const email = user?.email || '';
@@ -57,6 +59,10 @@ export default function TopNavigation({
       </nav>
       <div className="flex items-center gap-4 text-sm text-muted-foreground">
         <div className="sm:hidden flex items-center gap-2">
+          <button type="button" onClick={onOpenCheckouts} className="relative rounded-full border border-border p-2 text-foreground" aria-label="Open orders">
+            <ReceiptText size={16} />
+            <CountBadge count={checkoutCount} />
+          </button>
           <button type="button" onClick={onOpenSaved} className="relative rounded-full border border-border p-2 text-foreground">
             <Heart size={16} />
             <CountBadge count={savedCount} />
@@ -66,6 +72,11 @@ export default function TopNavigation({
             <CountBadge count={cartCount} />
           </button>
         </div>
+        <button className="hidden sm:flex gap-2 items-center relative" type="button" onClick={onOpenCheckouts}>
+          <ReceiptText size={16} />
+          Orders
+          <CountBadge count={checkoutCount} />
+        </button>
         <button className="hidden sm:flex gap-2 items-center relative" type="button" onClick={onOpenSaved}>
           <Heart size={16} />
           Saved

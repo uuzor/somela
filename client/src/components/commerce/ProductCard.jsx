@@ -100,7 +100,7 @@ export default function ProductCard({ product, selected, saved = false, inCart =
             <div className="w-full aspect-[3/4] object-cover rounded-[20px] bg-muted animate-pulse" />
           ) : (
             <>
-              <img src={currentImage} alt={currentTitle} className="w-full aspect-[4/2] object-cover perspective-origin-top-left rounded-[20px]" />
+              <img src={currentImage} alt={currentTitle} className="w-full  perspective-origin-top-left rounded-[20px]" />
               <div className="absolute left-4 bottom-4 flex items-center gap-2 flex-wrap">
                 <span className="badge">{product?.category || product?.productType || product?.tag || "Product"}</span>
                 {onSale && <span className="badge bg-primary text-primary-foreground">Sale</span>}

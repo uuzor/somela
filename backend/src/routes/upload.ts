@@ -1,7 +1,9 @@
 import { Router } from "express";
+import { eq } from "drizzle-orm";
 import { db, userSelfies } from "../db/index.js";
 import { uploadToStorage, generateStoragePath } from "../services/supabase.js";
 import { resolveRequestIdentity } from "../middleware/supabaseAuth.js";
+import { getYouCamApiKey, isYouCamConfigured, processSelfie } from "../services/youcam.js";
 
 export const uploadRouter = Router();
 
@@ -57,25 +59,42 @@ uploadRouter.post("/selfie", async (req, res) => {
     let publicUrl: string;
 
     if (imageUrl) {
+      if (!isSafeRemoteUrl(imageUrl)) {
+        return res.status(400).json({ error: "Invalid or unsafe image URL" });
+      }
       publicUrl = imageUrl;
     } else if (imageData) {
       const path = generateStoragePath(`selfies/${userId}`, "jpg");
       const buffer = Buffer.from(imageData, "base64");
+      if (buffer.length > MAX_UPLOAD_BYTES) {
+        return res.status(413).json({ error: "Image exceeds maximum size" });
+      }
       publicUrl = await uploadToStorage(BUCKET_NAME, path, buffer, "image/jpeg");
     } else {
       return res.status(400).json({ error: "imageUrl or imageData required" });
     }
 
+    await db.update(userSelfies).set({ isDefault: false }).where(eq(userSelfies.userId, userId));
+    const configured = isYouCamConfigured();
     const [selfie] = await db.insert(userSelfies).values({
       userId,
       imageUrl: publicUrl,
       isDefault: true,
+      status: configured ? "processing" : "completed",
     }).returning();
+
+    if (configured) {
+      void processSelfie(selfie.id, publicUrl, userId, getYouCamApiKey()).catch((error) => {
+        console.error("Async selfie preparation failed:", error);
+      });
+    }
 
     res.status(201).json({
       selfieId: selfie.id,
       imageUrl: publicUrl,
-      status: "success",
+      processedImageUrl: selfie.processedImageUrl,
+      status: selfie.status,
+      errorMessage: selfie.errorMessage,
     });
   } catch (error) {
     console.error("Selfie upload error:", error);

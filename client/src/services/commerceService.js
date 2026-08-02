@@ -212,44 +212,106 @@ export async function startTryOn(product, options = {}) {
     ? product.map((item) => (typeof item === "string" ? item : item?.id)).filter(Boolean)
     : [typeof product === "string" ? product : product?.id].filter(Boolean);
 
-  try {
-    const data = await request("/api/tryon", {
-      method: "POST",
-      headers: userHeaders(options.userId),
-      body: {
-        productIds,
-      },
-    });
+  if (productIds.length === 0) throw new Error("A valid product is required for try-on.");
+  const data = await request(productIds.length > 1 ? "/api/tryon/multi" : "/api/tryon", {
+    method: "POST",
+    headers: userHeaders(options.userId),
+    body: {
+      productIds,
+      selfieId: options.selfieId,
+    },
+  });
 
-    return {
-      id: data.taskId || randomId(),
-      product: Array.isArray(product) ? product.map(normalizeProduct) : normalizeProduct(product),
-      status: data.status || "queued",
-      externalTaskId: data.externalTaskId,
-    };
-  } catch {
-    await wait(350);
-    return { id: randomId(), product, status: "queued" };
-  }
+  return {
+    id: data.taskId || randomId(),
+    product: Array.isArray(product) ? product.map(normalizeProduct) : normalizeProduct(product),
+    status: data.status || "processing",
+    externalTaskId: data.externalTaskId,
+    resultImageUrl: data.resultImageUrl || null,
+    errorMessage: data.errorMessage || null,
+  };
 }
 
 export async function getTryOnStatus(job, options = {}) {
   const jobId = typeof job === "string" ? job : job?.id;
 
-  try {
-    const data = await request(`/api/tryon/${encodeURIComponent(jobId)}`, {
-      headers: userHeaders(options.userId),
-    });
+  const data = await request("/api/tryon/" + encodeURIComponent(jobId), {
+    headers: userHeaders(options.userId),
+    signal: options.signal,
+  });
 
-    return {
-      ...(typeof job === "object" ? job : { id: jobId }),
-      ...data,
-      id: job?.id || jobId,
-    };
-  } catch {
-    await wait(1200);
-    return { ...(typeof job === "object" ? job : { id: jobId }), status: "ready" };
+  return {
+    ...(typeof job === "object" ? job : { id: jobId }),
+    ...data,
+    id: job?.id || jobId,
+  };
+}
+
+export async function pollTryOnStatus(job, options = {}) {
+  const intervalMs = options.intervalMs || 2500;
+  const maxAttempts = options.maxAttempts || 90;
+  let current = job;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (options.signal?.aborted) throw new DOMException("Try-on polling cancelled", "AbortError");
+    current = await getTryOnStatus(current, options);
+    options.onUpdate?.(current);
+    if (current.status === "completed" || current.status === "failed") return current;
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, intervalMs);
+      options.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new DOMException("Try-on polling cancelled", "AbortError"));
+      }, { once: true });
+    });
   }
+
+  throw new Error("Try-on is taking longer than expected. You can return and check again.");
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Failed to read selfie image."));
+    reader.onload = () => {
+      const value = String(reader.result || "");
+      resolve(value.includes(",") ? value.slice(value.indexOf(",") + 1) : value);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function uploadTryOnSelfie(file, options = {}) {
+  if (!file?.type?.startsWith("image/")) throw new Error("Please choose an image file.");
+  if (file.size > 10 * 1024 * 1024) throw new Error("Selfie must be smaller than 10 MB.");
+  const imageData = await fileToBase64(file);
+  return request("/api/upload/selfie", {
+    method: "POST",
+    headers: userHeaders(options.userId),
+    body: { imageData },
+  });
+}
+
+export async function listTryOnSelfies(options = {}) {
+  const data = await request("/api/tryon/selfies", {
+    headers: userHeaders(options.userId),
+    signal: options.signal,
+  });
+  return Array.isArray(data?.selfies) ? data.selfies : [];
+}
+
+export async function waitForSelfie(selfieId, options = {}) {
+  const maxAttempts = options.maxAttempts || 90;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (options.signal?.aborted) throw new DOMException("Selfie polling cancelled", "AbortError");
+    const selfies = await listTryOnSelfies(options);
+    const selfie = selfies.find((item) => item.id === selfieId);
+    options.onUpdate?.(selfie);
+    if (selfie?.status === "completed") return selfie;
+    if (selfie?.status === "failed") throw new Error(selfie.errorMessage || "Selfie preparation failed.");
+    await wait(options.intervalMs || 2500);
+  }
+  throw new Error("Selfie preparation is taking longer than expected.");
 }
 
 export async function preparePurchase(options = {}) {

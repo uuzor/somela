@@ -1,5 +1,8 @@
-import { Heart, ShoppingBag, Minus, Plus, Trash2, X } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown, Heart, ShoppingBag, Minus, Plus, ReceiptText, RotateCcw, Trash2, X } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+
+import { ACTIVE_CHECKOUT_STATUSES, groupCheckoutsByGroupId } from '@/services/checkoutService';
 
 function toNumber(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -125,6 +128,127 @@ function DrawerItem({ item, mode, onRemove, onAddToCart, onUpdateCartQuantity, o
   );
 }
 
+const CHECKOUT_STATUS_LABELS = {
+  created: "Preparing",
+  awaiting_approval: "Awaiting approval",
+  approved: "Approved · Processing",
+  paid: "Paid",
+  failed: "Failed",
+  expired: "Expired",
+  cancelled: "Cancelled",
+};
+
+function CheckoutHistoryGroup({ group, onSync, onRetry }) {
+  const checkouts = Array.isArray(group?.checkouts) ? group.checkouts : [];
+  const itemCount = checkouts.reduce((sum, checkout) => sum + (Array.isArray(checkout?.items) ? checkout.items.reduce((itemSum, item) => itemSum + Number(item?.quantity || 1), 0) : 0), 0);
+  const total = checkouts.reduce((sum, checkout) => sum + Number(checkout?.total || 0), 0);
+  const currencies = [...new Set(checkouts.map((checkout) => checkout?.currency).filter(Boolean))];
+  const currency = currencies.length === 1 ? currencies[0] : 'USD';
+  const createdAt = group?.createdAt ? new Date(group.createdAt) : null;
+
+  return (
+    <section className='rounded-2xl border border-border bg-muted/20 p-2.5'>
+      <div className='mb-2 flex items-start justify-between gap-3 px-1'>
+        <div className='min-w-0'>
+          <p className='text-xs font-medium'>Checkout group</p>
+          <p className='truncate text-[10px] text-muted-foreground'>{group?.id}</p>
+          {createdAt && !Number.isNaN(createdAt.getTime()) && (
+            <p className='mt-1 text-[10px] text-muted-foreground'>{createdAt.toLocaleString()}</p>
+          )}
+        </div>
+        <div className='shrink-0 text-right'>
+          <p className='text-sm font-medium'>{formatMoney(total, currency)}</p>
+          <p className='text-[10px] text-muted-foreground'>
+            {checkouts.length} order{checkouts.length === 1 ? '' : 's'} / {itemCount} item{itemCount === 1 ? '' : 's'}
+          </p>
+        </div>
+      </div>
+      <div className='space-y-2'>
+        {checkouts.map((checkout) => (
+          <CheckoutHistoryItem key={checkout.id} checkout={checkout} onSync={onSync} onRetry={onRetry} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CheckoutHistoryItem({ checkout, onSync, onRetry }) {
+  const [expanded, setExpanded] = useState(false);
+  const items = Array.isArray(checkout?.items) ? checkout.items : [];
+  const status = checkout?.status || "created";
+  const active = status === "awaiting_approval" || status === "approved";
+  const retryable = status === "failed" || status === "expired" || status === "cancelled";
+  const statusTone = status === "paid"
+    ? "text-emerald-500"
+    : status === "failed" || status === "expired" || status === "cancelled"
+      ? "text-destructive"
+      : "text-primary";
+  const createdAt = checkout?.createdAt ? new Date(checkout.createdAt) : null;
+
+  return (
+    <article className="rounded-2xl border border-border bg-background/50 p-3">
+      <button type="button" onClick={() => setExpanded((value) => !value)} className="flex w-full items-start gap-3 text-left">
+        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-border bg-muted/40">
+          <ReceiptText size={18} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{checkout?.merchantName || "Merchant checkout"}</p>
+              <p className={`mt-0.5 text-[11px] ${statusTone}`}>{CHECKOUT_STATUS_LABELS[status] || status}</p>
+            </div>
+            <ChevronDown size={14} className={`mt-1 text-muted-foreground transition ${expanded ? "rotate-180" : ""}`} />
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <span className="text-sm font-medium">{formatMoney(checkout?.total, checkout?.currency)}</span>
+            <span className="text-[10px] text-muted-foreground">{items.length} item{items.length === 1 ? "" : "s"}</span>
+          </div>
+          {createdAt && !Number.isNaN(createdAt.getTime()) && (
+            <p className="mt-1 text-[10px] text-muted-foreground">{createdAt.toLocaleString()}</p>
+          )}
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="mt-3 border-t border-border pt-3">
+          <div className="space-y-2">
+            {items.map((item, index) => (
+              <div key={item?.cartItemId || item?.productId || `${checkout?.id}-${index}`} className="flex items-center gap-2 text-xs">
+                {item?.image ? (
+                  <img src={item.image} alt={item?.name || "Checkout item"} className="h-9 w-9 rounded-lg object-cover" />
+                ) : (
+                  <div className="h-9 w-9 rounded-lg bg-muted" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium">{item?.name || item?.description || "Product"}</p>
+                  <p className="text-[10px] text-muted-foreground">Qty {Number(item?.quantity || 1)}</p>
+                </div>
+                <span>{formatMoney(item?.unitPrice ?? item?.unit_price, checkout?.currency)}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 space-y-1 text-[10px] text-muted-foreground">
+            <p>Order ID: {checkout?.providerOrderId || "Pending"}</p>
+            <p>Prava session: {checkout?.providerSessionId || "Pending"}</p>
+          </div>
+          {(active || retryable) && (
+            <div className="mt-3 flex gap-2">
+              {active && (
+                <button type="button" onClick={() => onSync?.(checkout)} className="inline-flex flex-1 items-center justify-center gap-2 rounded-full border border-border px-3 py-2 text-xs font-medium hover:bg-muted">
+                  <RotateCcw size={13} /> Refresh
+                </button>
+              )}
+              {retryable && (
+                <button type="button" onClick={() => onRetry?.(checkout)} className="primary flex-1">Retry checkout</button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
 export default function LibraryDrawer({
   open,
   onOpenChange,
@@ -132,16 +256,26 @@ export default function LibraryDrawer({
   onTabChange,
   cartItems = [],
   savedItems = [],
+  checkoutItems = [],
+  checkoutsLoading = false,
+  checkoutsError = "",
   onRemoveCartItem,
   onRemoveSavedItem,
   onAddToCart,
   onUpdateCartQuantity,
   onSelectProduct,
+  onRefreshCheckouts,
+  onSyncCheckout,
+  onRetryCheckout,
 }) {
   const cartCount = Array.isArray(cartItems) ? cartItems.reduce((sum, item) => sum + Number(item?.qty ?? item?.quantity ?? 1), 0) : 0;
   const savedCount = Array.isArray(savedItems) ? savedItems.length : 0;
+  const checkoutGroups = groupCheckoutsByGroupId(checkoutItems);
+  const activeCheckoutCount = checkoutGroups.filter((group) => group.checkouts.some((checkout) => ACTIVE_CHECKOUT_STATUSES.has(checkout.status))).length;
   const isCart = activeTab === "cart";
-  const items = isCart ? cartItems : savedItems;
+  const isSaved = activeTab === "saved";
+  const isCheckouts = activeTab === "checkouts";
+  const items = isCart ? cartItems : isSaved ? savedItems : checkoutGroups;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -152,7 +286,7 @@ export default function LibraryDrawer({
               <div>
                 <SheetTitle className="text-lg">Your library</SheetTitle>
                 <SheetDescription className="text-xs text-muted-foreground">
-                  Saved products and cart items in one place.
+                  Saved products, cart items, and orders in one place.
                 </SheetDescription>
               </div>
               <button type="button" onClick={() => onOpenChange(false)} className="rounded-full border border-border p-2 text-muted-foreground hover:text-foreground hover:bg-muted">
@@ -167,18 +301,36 @@ export default function LibraryDrawer({
                   <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] text-white">{cartCount}</span>
                 </span>
               </button>
-              <button type="button" onClick={() => onTabChange?.("saved")} className={`rounded-full px-3 py-1.5 ${!isCart ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"}`}>
+              <button type="button" onClick={() => onTabChange?.("saved")} className={`rounded-full px-3 py-1.5 ${isSaved ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"}`}>
                 <span className="inline-flex items-center gap-2">
                   <Heart size={14} />
                   Saved
                   <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] text-white">{savedCount}</span>
                 </span>
               </button>
+              <button type="button" onClick={() => onTabChange?.("checkouts")} className={`rounded-full px-3 py-1.5 ${isCheckouts ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"}`}>
+                <span className="inline-flex items-center gap-2">
+                  <ReceiptText size={14} />
+                  Orders
+                  {activeCheckoutCount > 0 && <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] text-white">{activeCheckoutCount}</span>}
+                </span>
+              </button>
             </div>
           </SheetHeader>
 
           <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-            {Array.isArray(items) && items.length > 0 ? (
+            {isCheckouts && checkoutsLoading ? (
+              <div className="rounded-2xl border border-dashed border-border px-5 py-10 text-center text-sm text-muted-foreground">Loading orders...</div>
+            ) : isCheckouts && checkoutsError ? (
+              <div className="rounded-2xl border border-dashed border-border px-5 py-10 text-center text-sm text-muted-foreground">
+                <p>{checkoutsError}</p>
+                <button type="button" onClick={onRefreshCheckouts} className="mt-3 text-primary">Try again</button>
+              </div>
+            ) : isCheckouts && Array.isArray(items) && items.length > 0 ? (
+              items.map((group) => (
+                <CheckoutHistoryGroup key={group.id} group={group} onSync={onSyncCheckout} onRetry={onRetryCheckout} />
+              ))
+            ) : Array.isArray(items) && items.length > 0 ? (
               items.map((item) => (
                 <DrawerItem
                   key={isCart ? getCartItemId(item) || getProductId(item?.product || item) : normalizeSavedItem(item).savedId || getProductId(item?.product || item)}
@@ -192,7 +344,7 @@ export default function LibraryDrawer({
               ))
             ) : (
               <div className="rounded-2xl border border-dashed border-border px-5 py-10 text-center text-sm text-muted-foreground">
-                {isCart ? "Your cart is empty." : "No saved items yet."}
+                {isCart ? "Your cart is empty." : isSaved ? "No saved items yet." : "No checkout history yet."}
               </div>
             )}
           </div>

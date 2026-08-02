@@ -1,5 +1,7 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
+  cartItems,
+  carts,
   checkouts,
   db,
   pravaPaymentSessions,
@@ -34,6 +36,29 @@ function ownerFilter(owner: CheckoutOwner) {
   if (owner.userId) return eq(checkouts.userId, owner.userId);
   if (owner.sessionId) return eq(checkouts.sessionId, owner.sessionId);
   return null;
+}
+
+async function removePaidCheckoutItems(owner: CheckoutOwner, items: CheckoutItemSnapshot[]) {
+  const cartItemIds = [...new Set(items.map((item) => item.cartItemId).filter((id): id is string => Boolean(id)))];
+  if (cartItemIds.length === 0) return;
+
+  const cartOwnerFilter = owner.userId
+    ? eq(carts.userId, owner.userId)
+    : owner.sessionId
+      ? eq(carts.sessionId, owner.sessionId)
+      : null;
+  if (!cartOwnerFilter) return;
+
+  const ownedCarts = await db.select({ id: carts.id }).from(carts).where(cartOwnerFilter);
+  const ownedCartIds = ownedCarts.map((cart) => cart.id);
+  if (ownedCartIds.length === 0) return;
+
+  await db.delete(cartItems).where(
+    and(
+      inArray(cartItems.id, cartItemIds),
+      inArray(cartItems.cartId, ownedCartIds),
+    ),
+  );
 }
 
 function serializeCheckout(row: any) {
@@ -237,6 +262,9 @@ export async function syncCheckoutStatus(
   if (!current) return null;
 
   if (TERMINAL_STATUSES.has(current.status)) {
+    if (current.status === "paid") {
+      await removePaidCheckoutItems(owner, Array.isArray(current.items) ? current.items : []);
+    }
     return { checkout: current, paymentResult: null };
   }
 
@@ -290,6 +318,10 @@ export async function syncCheckoutStatus(
       updatedAt: now,
     })
     .where(eq(pravaTransactions.paymentSessionId, current.paymentSessionId));
+
+  if (status === "paid") {
+    await removePaidCheckoutItems(owner, Array.isArray(current.items) ? current.items : []);
+  }
 
   return {
     checkout: serializeCheckout(updated),

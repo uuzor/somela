@@ -15,6 +15,7 @@ export default defineConfig({
       'localhost',
       '127.0.0.1',
       'pompously-prettied-malena.ngrok-free.dev',
+      'pompously-prettied-malena.ngrok-free.dev',
       '.ngrok-free.dev',
       '.loca.lt',
     ],

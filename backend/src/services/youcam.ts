@@ -15,9 +15,9 @@
 import crypto from "crypto";
 import { db } from "../db/index.js";
 import { userSelfies } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
-const YOUCAM_BASE_URL = "https://yce-api-01.makeupar.com";
+const YOUCAM_BASE_URL = process.env.YOUCAM_API_BASE_URL || "https://yce-api-01.makeupar.com";
 
 // Type definitions - YouCam API wraps responses in { status, data }
 interface YouCamApiResponse<T> {
@@ -375,6 +375,11 @@ export async function processSelfie(
   userId: string,
   apiKey: string
 ): Promise<string | null> {
+  await db
+    .update(userSelfies)
+    .set({ status: "processing", errorMessage: null })
+    .where(and(eq(userSelfies.id, selfieId), eq(userSelfies.userId, userId)));
+
   console.log(`Processing selfie ${selfieId} for user ${userId}`);
   const processedUrl = await processImage(imageUrl, apiKey);
 
@@ -383,11 +388,17 @@ export async function processSelfie(
       .update(userSelfies)
       .set({
         processedImageUrl: processedUrl,
+        status: "completed",
+        errorMessage: null,
       })
-      .where(eq(userSelfies.id, selfieId));
+      .where(and(eq(userSelfies.id, selfieId), eq(userSelfies.userId, userId)));
 
     console.log(`Selfie ${selfieId} processed, stored at: ${processedUrl}`);
   } else {
+    await db
+      .update(userSelfies)
+      .set({ status: "failed", errorMessage: "Selfie preparation failed" })
+      .where(and(eq(userSelfies.id, selfieId), eq(userSelfies.userId, userId)));
     console.error(`Selfie ${selfieId} processing failed`);
   }
 
@@ -484,7 +495,7 @@ export function getYouCamApiKey(): string {
  * Get YouCam webhook secret
  */
 export function getYouCamWebhookSecret(): string {
-  const secret = process.env.YOUCAM_SECRET_KEY;
+  const secret = process.env.YOUCAM_WEBHOOK_SECRET || process.env.YOUCAM_SECRET_KEY;
   if (!secret) {
     throw new Error("YOUCAM_SECRET_KEY not configured");
   }

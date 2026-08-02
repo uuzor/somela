@@ -1,2 +1,102 @@
-import { ArrowLeft, Heart, Scale, ShoppingBag } from 'lucide-react';import TryOnQueue from './TryOnQueue';
-export default function TryOnStudio({product,jobs,onMode}){const ready=jobs.some(j=>j.status==='ready');return <div className="h-full flex flex-col p-5 overflow-y-auto"><div><h1 className="text-2xl font-semibold">Virtual try-on</h1><p className="text-xs text-muted-foreground">{product.name} · Black · Size M</p></div><div className="flex-1 grid lg:grid-cols-[1fr_1fr_200px] gap-3 mt-4 min-h-0"><div className="relative"><img src={product.image} alt="Original outfit" className="w-full h-full min-h-64 object-cover rounded-[20px]"/><span className="badge absolute top-3 left-3 bg-card">Original</span></div><div className="relative"><img src={product.image} alt="Generated virtual try-on" className={`w-full h-full min-h-64 object-cover rounded-[20px] ${ready?'':'opacity-40'}`}/><span className="badge absolute top-3 left-3 bg-card">{ready?'Try-on':'Processing…'}</span></div><aside className="panel p-4"><img src={product.image} alt="Selected garment" className="w-16 h-16 object-cover rounded-xl float-left mr-2"/><p className="text-xs font-medium">{product.name}</p><p className="text-xs text-muted-foreground">${product.price}</p><div className="clear-both pt-4"><p className="label">Colour: Black</p><div className="flex gap-2"><span className="swatch bg-black ring-2 ring-primary"/><span className="swatch bg-amber-800"/></div><p className="label">Size: M</p><button className="control"><Heart size={14}/>Save look</button><TryOnQueue jobs={jobs}/></div></aside></div><p className="text-[10px] text-muted-foreground mt-2">Virtual preview — confirm the merchant's size guide before purchase.</p><div className="panel p-3 mt-4 flex gap-2 items-center"><button onClick={()=>onMode('results')} className="control"><ArrowLeft size={15}/>Back to results</button><button onClick={()=>onMode('comparison')} className="control"><Scale size={15}/>Compare another</button><button onClick={()=>onMode('checkout')} className="primary ml-auto"><ShoppingBag size={15}/>Continue to checkout</button></div></div>}
+import { ArrowLeft, Heart, ImageUp, Loader2, RefreshCcw, Scale, ShoppingBag } from "lucide-react";
+import TryOnQueue from "./TryOnQueue";
+
+function productKey(product) {
+  return product?.id || product?.productId || product?.raw?.productId || null;
+}
+
+export default function TryOnStudio({ product, jobs = [], onMode, onUploadSelfie, onRetry }) {
+  const key = productKey(product);
+  const currentJob = jobs.find((job) => productKey(job.product) === key) || jobs[0] || null;
+  const ready = currentJob?.status === "completed";
+  const needsSelfie = currentJob?.status === "needs_selfie";
+  const failed = currentJob?.status === "failed";
+  const selfieProcessing = currentJob?.status === "selfie_processing";
+  const processing = ["starting", "pending", "processing", "queued"].includes(currentJob?.status);
+  const sourceImage = product?.image || product?.primaryImage || product?.images?.[0] || "";
+  const resultImage = ready && currentJob?.resultImageUrl ? currentJob.resultImageUrl : sourceImage;
+  const title = product?.name || product?.title || "Selected garment";
+  const price = product?.displayPrice || product?.price || product?.minPrice || "";
+
+  return (
+    <div className="h-full flex flex-col p-5 overflow-y-auto">
+      <div>
+        <h1 className="text-2xl font-semibold">Virtual try-on</h1>
+        <p className="text-xs text-muted-foreground">{title} ? {product?.color || "Selected colour"} ? {product?.size || "Selected size"}</p>
+      </div>
+
+      <div className="flex-1 grid lg:grid-cols-[1fr_1fr_200px] gap-3 mt-4 min-h-0">
+        <div className="relative">
+          <img src={sourceImage} alt="Original outfit" className="w-full h-full min-h-64 object-cover rounded-[20px]" />
+          <span className="badge absolute top-3 left-3 bg-card">Original</span>
+        </div>
+
+        <div className="relative">
+          <img
+            src={resultImage}
+            alt={ready ? "Generated virtual try-on" : "Try-on processing preview"}
+            className={"w-full h-full min-h-64 object-cover rounded-[20px] " + (ready ? "" : "opacity-40")}
+          />
+          <span className="badge absolute top-3 left-3 bg-card">
+            {ready ? "Try-on" : failed ? "Failed" : needsSelfie ? "Selfie required" : selfieProcessing ? "Preparing selfie..." : "Processing..."}
+          </span>
+          {(processing || selfieProcessing) && (
+            <div className="absolute inset-0 grid place-items-center">
+              <Loader2 className="animate-spin text-primary" size={28} />
+            </div>
+          )}
+        </div>
+
+        <aside className="panel p-4">
+          <img src={sourceImage} alt="Selected garment" className="w-16 h-16 object-cover rounded-xl float-left mr-2" />
+          <p className="text-xs font-medium">{title}</p>
+          <p className="text-xs text-muted-foreground">{typeof price === "number" ? "$" + price : price}</p>
+
+          <div className="clear-both pt-4">
+            <p className="label">Colour: {product?.color || "Selected"}</p>
+            <div className="flex gap-2">
+              <span className="swatch bg-black ring-2 ring-primary" />
+              <span className="swatch bg-amber-800" />
+            </div>
+            <p className="label">Size: {product?.size || "Selected"}</p>
+            <button className="control"><Heart size={14} />Save look</button>
+
+            {(needsSelfie || failed) && (
+              <div className="mt-3 space-y-2">
+                {currentJob?.errorMessage && <p className="text-[10px] text-destructive">{currentJob.errorMessage}</p>}
+                <label className="control cursor-pointer">
+                  <ImageUp size={14} />
+                  Upload selfie
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) onUploadSelfie?.(file);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                {failed && (
+                  <button type="button" onClick={() => onRetry?.(product)} className="control">
+                    <RefreshCcw size={14} />Retry
+                  </button>
+                )}
+              </div>
+            )}
+
+            <TryOnQueue jobs={jobs} />
+          </div>
+        </aside>
+      </div>
+
+      <p className="text-[10px] text-muted-foreground mt-2">Virtual preview - confirm the merchant&apos;s size guide before purchase.</p>
+      <div className="panel p-3 mt-4 flex gap-2 items-center">
+        <button onClick={() => onMode("results")} className="control"><ArrowLeft size={15} />Back to results</button>
+        <button onClick={() => onMode("comparison")} className="control"><Scale size={15} />Compare another</button>
+        <button onClick={() => onMode("checkout")} className="primary ml-auto"><ShoppingBag size={15} />Continue to checkout</button>
+      </div>
+    </div>
+  );
+}

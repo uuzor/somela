@@ -20,6 +20,7 @@ import { products, cartSeed, merchantNames } from "@/data/commerceData";
 import { normalizeProduct } from "@/services/canvasModel";
 import * as api from "@/services/commerceService";
 import * as pravaApi from "@/services/paymentsService";
+import * as checkoutApi from "@/services/checkoutService";
 
 const initial = [
   {
@@ -64,8 +65,13 @@ function buildCheckoutPurchase(items, override = null) {
   if (override?.merchantName || override?.merchant || override?.merchantUrl) {
     const normalizedItems = sourceItems.map((item) => ({
       description: item?.description || item?.name || item?.title || "Item",
+      name: item?.name || item?.description || item?.title || "Item",
       unitPrice: String(item?.unitPrice ?? item?.price ?? item?.displayPrice ?? item?.minPrice ?? 0),
       quantity: Number(item?.quantity ?? item?.qty ?? 1),
+      productId: item?.productId || item?.product?.id || item?.id || null,
+      cartItemId: item?.cartItemId || item?.cartId || item?.itemId || null,
+      variantId: item?.variantId || null,
+      image: item?.image || item?.primaryImage || item?.product?.primaryImage || item?.product?.image || null,
     }));
 
     const totalAmount = Number(override?.totalAmount ?? override?.total ?? normalizedItems.reduce((sum, item) => sum + Number(item.unitPrice || 0) * Number(item.quantity || 1), 0));
@@ -91,8 +97,13 @@ function buildCheckoutPurchase(items, override = null) {
   const [merchantName, merchantItems] = groups.entries().next().value || ["Prava checkout", sourceItems];
   const normalizedItems = merchantItems.map((item) => ({
     description: item?.description || item?.name || item?.title || "Item",
+    name: item?.name || item?.description || item?.title || "Item",
     unitPrice: String(item?.unitPrice ?? item?.price ?? item?.displayPrice ?? item?.minPrice ?? 0),
     quantity: Number(item?.quantity ?? item?.qty ?? 1),
+    productId: item?.productId || item?.product?.id || item?.id || null,
+    cartItemId: item?.cartItemId || item?.cartId || item?.itemId || null,
+    variantId: item?.variantId || null,
+    image: item?.image || item?.primaryImage || item?.product?.primaryImage || item?.product?.image || null,
   }));
 
   const totalAmount = normalizedItems.reduce((sum, item) => sum + Number(item.unitPrice || 0) * Number(item.quantity || 1), 0);
@@ -207,17 +218,29 @@ export default function OpenCommerceLens() {
   const [approvalError, setApprovalError] = useState("");
   const [approvalStatus, setApprovalStatus] = useState("idle");
   const [paymentSuccessOpen, setPaymentSuccessOpen] = useState(false);
+  const [paymentSuccessStatus, setPaymentSuccessStatus] = useState("approved");
+  const [checkouts, setCheckouts] = useState([]);
+  const [checkoutsLoading, setCheckoutsLoading] = useState(false);
+  const [checkoutsError, setCheckoutsError] = useState("");
+  const [activeCheckout, setActiveCheckout] = useState(null);
   const [tab, setTab] = useState("canvas");
   const [suggestedTasks, setSuggestedTasks] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [resultsLoading, setResultsLoading] = useState(false);
   const reduce = useReducedMotion();
   const assistantDraftId = useRef(null);
+  const tryOnControllersRef = useRef(new Map());
   const paymentSuccessTimerRef = useRef(null);
   const hydrationOwnerRef = useRef(null);
+  const approvalHandledRef = useRef(new Set());
+  const paidHandledRef = useRef(new Set());
   const displayedProducts = useMemo(() => filterCatalogProducts(visible, filters), [visible, filters]);
   const cartCount = useMemo(() => (Array.isArray(cart) ? cart.reduce((sum, item) => sum + Number(item?.qty ?? item?.quantity ?? 1), 0) : 0), [cart]);
   const savedCount = useMemo(() => (Array.isArray(savedProducts) ? savedProducts.length : 0), [savedProducts]);
+  const activeCheckoutCount = useMemo(
+    () => checkoutApi.groupCheckoutsByGroupId(checkouts).filter((group) => group.checkouts.some((checkout) => checkoutApi.ACTIVE_CHECKOUT_STATUSES.has(checkout.status))).length,
+    [checkouts]
+  );
   const cartProductIds = useMemo(() => (Array.isArray(cart) ? cart.map((item) => item?.productId || getProductKey(item?.product || item)).filter(Boolean) : []), [cart]);
   const savedProductIds = useMemo(() => (Array.isArray(savedProducts) ? savedProducts.map((item) => item?.productId || getProductKey(item?.product || item)).filter(Boolean) : []), [savedProducts]);
   const selectedProducts = useMemo(() => {
@@ -226,13 +249,13 @@ export default function OpenCommerceLens() {
   }, [selectedProductIds, visible]);
   const primarySelected = selectedProducts[0] || selected || visible[0] || null;
   const checkoutPurchase = useMemo(() => buildCheckoutPurchase(cart, pendingPurchase), [cart, pendingPurchase]);
-  const handlePaymentSuccess = () => {
-    setApprovalStatus("completed");
+  const showPaymentNotice = (status) => {
+    setPaymentSuccessStatus(status);
     setApprovalOpen(false);
     setPaymentSuccessOpen(true);
     toast({
-      title: "Payment successful",
-      description: "Prava confirmed the checkout.",
+      title: status === "paid" ? "Payment successful" : "Payment approved",
+      description: status === "paid" ? "The merchant confirmed your payment." : "Prava approved the payment. Merchant confirmation is pending.",
     });
 
     if (paymentSuccessTimerRef.current) {
@@ -244,9 +267,36 @@ export default function OpenCommerceLens() {
     }, 1200);
   };
 
+  const refreshCheckouts = async () => {
+    if (!userId) {
+      setCheckouts([]);
+      return [];
+    }
+
+    setCheckoutsLoading(true);
+    setCheckoutsError("");
+    try {
+      const response = await checkoutApi.listCheckouts({ userId, limit: 50 });
+      const rows = Array.isArray(response?.checkouts) ? response.checkouts : [];
+      const normalizedRows = rows.map((checkout) => ({ ...checkout, status: checkoutApi.normalizeCheckoutStatus(checkout.status) }));
+      setCheckouts(normalizedRows);
+      setActiveCheckout((current) => {
+        if (current?.id) return normalizedRows.find((checkout) => checkout.id === current.id) || current;
+        return normalizedRows.find((checkout) => checkoutApi.ACTIVE_CHECKOUT_STATUSES.has(checkout.status)) || null;
+      });
+      return rows;
+    } catch (error) {
+      setCheckoutsError(error instanceof Error ? error.message : "Failed to load checkout history");
+      return [];
+    } finally {
+      setCheckoutsLoading(false);
+    }
+  };
+
   const openLibrary = (tabName = "cart") => {
     setLibraryTab(tabName);
     setLibraryOpen(true);
+    if (tabName === "checkouts") refreshCheckouts();
   };
 
   const refreshLibrary = async () => {
@@ -277,26 +327,41 @@ export default function OpenCommerceLens() {
     if (userId) {
       setCart([]);
       setSavedProducts([]);
+      setCheckouts([]);
     } else {
       setCart(cartSeed);
       setSavedProducts([]);
+      setCheckouts([]);
     }
+    setActiveCheckout(null);
+    setApprovalSession(null);
+    setPendingPurchase(null);
+    setApprovalOpen(false);
+    setApprovalStatus("idle");
+    approvalHandledRef.current.clear();
+    paidHandledRef.current.clear();
 
     const hydrateLibrary = async () => {
-      const [nextCart, nextSaved] = await Promise.all([
+      const [nextCart, nextSaved, checkoutResponse] = await Promise.all([
         api.fetchCartItems({ sessionId, userId }),
         api.fetchSavedProducts({ sessionId, userId }),
+        userId ? checkoutApi.listCheckouts({ userId, limit: 50 }) : Promise.resolve({ checkouts: [] }),
       ]);
 
       if (!alive || hydrationOwnerRef.current !== ownerKey) return;
       setCart(Array.isArray(nextCart) ? nextCart : userId || sessionId ? [] : cartSeed);
       setSavedProducts(Array.isArray(nextSaved) ? nextSaved : []);
+      const nextCheckouts = Array.isArray(checkoutResponse?.checkouts) ? checkoutResponse.checkouts : [];
+      const normalizedCheckouts = nextCheckouts.map((checkout) => ({ ...checkout, status: checkoutApi.normalizeCheckoutStatus(checkout.status) }));
+      setCheckouts(normalizedCheckouts);
+      setActiveCheckout(normalizedCheckouts.find((checkout) => checkoutApi.ACTIVE_CHECKOUT_STATUSES.has(checkout.status)) || null);
     };
 
     hydrateLibrary().catch(() => {
       if (!alive || hydrationOwnerRef.current !== ownerKey) return;
       setCart(userId || sessionId ? [] : cartSeed);
       setSavedProducts([]);
+      setCheckouts([]);
     });
 
     return () => {
@@ -798,6 +863,22 @@ export default function OpenCommerceLens() {
               setPendingPurchase(event.data.purchase || null);
               setMode("checkout");
             }
+            if (event.data?.type === "payment_pending") {
+              const paymentSessionId = event.data.purchaseIntentId || pendingPurchase?.paymentSessionId || pendingPurchase?.purchaseIntentId || null;
+              const nextSession = {
+                ...(pendingPurchase || {}),
+                id: paymentSessionId,
+                paymentSessionId,
+                providerSessionId: event.data.providerSessionId || pendingPurchase?.providerSessionId || null,
+                approvalUrl: event.data.approvalUrl || pendingPurchase?.approvalUrl || null,
+                status: "pending_approval",
+              };
+              setPendingPurchase((current) => ({ ...(current || {}), ...nextSession }));
+              setApprovalSession(nextSession);
+              setApprovalStatus("awaiting_approval");
+              setApprovalOpen(true);
+              setMode("checkout");
+            }
             return;
           }
 
@@ -835,15 +916,91 @@ export default function OpenCommerceLens() {
       setResultsLoading(false);
     }
   };
+  const updateTryOnJob = (jobId, patch) => {
+    setJobs((current) => current.map((item) => (item.id === jobId ? { ...item, ...patch } : item)));
+  };
+
+  const runTryOn = async (nextProduct, selfieId, placeholderId) => {
+    let activeJobId = placeholderId;
+    try {
+      const job = await api.startTryOn(nextProduct, { userId, selfieId });
+      activeJobId = job.id;
+      setJobs((current) => [
+        { ...job, product: nextProduct },
+        ...current.filter((item) => item.id !== placeholderId && item.id !== job.id),
+      ]);
+
+      const controller = new AbortController();
+      tryOnControllersRef.current.set(job.id, controller);
+      await api.pollTryOnStatus(job, {
+        userId,
+        signal: controller.signal,
+        onUpdate: (next) => updateTryOnJob(job.id, { ...next, product: nextProduct }),
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      updateTryOnJob(activeJobId, {
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : "Try-on failed",
+      });
+    } finally {
+      tryOnControllersRef.current.delete(activeJobId);
+    }
+  };
+
   const startTry = async (product) => {
     const nextProduct = product || primarySelected || selected || products[0];
     setSelected(nextProduct);
     setMode("tryon");
-    const job = await api.startTryOn(nextProduct);
-    setJobs((current) => [job, ...current]);
-    api.getTryOnStatus(job).then((done) => {
-      setJobs((current) => current.map((item) => (item.id === done.id ? done : item)));
-    });
+    const placeholderId = randomId("tryon");
+    setJobs((current) => [{ id: placeholderId, product: nextProduct, status: "starting" }, ...current]);
+
+    try {
+      const selfies = await api.listTryOnSelfies({ userId });
+      const selfie = selfies.find((item) => item.isDefault) || selfies[0];
+      if (!selfie) {
+        updateTryOnJob(placeholderId, { status: "needs_selfie" });
+        return;
+      }
+      if (selfie.status === "failed") {
+        updateTryOnJob(placeholderId, { status: "needs_selfie", errorMessage: selfie.errorMessage });
+        return;
+      }
+      if (selfie.status === "processing") {
+        updateTryOnJob(placeholderId, { status: "selfie_processing" });
+        await api.waitForSelfie(selfie.id, { userId });
+      }
+      await runTryOn(nextProduct, selfie.id, placeholderId);
+    } catch (error) {
+      updateTryOnJob(placeholderId, {
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : "Unable to start try-on",
+      });
+    }
+  };
+
+  const uploadTryOnSelfie = async (file) => {
+    const nextProduct = selected || primarySelected || products[0];
+    const existing = jobs.find((job) => job.product === nextProduct && ["needs_selfie", "failed"].includes(job.status));
+    const placeholderId = existing?.id || randomId("tryon");
+    if (!existing) {
+      setJobs((current) => [{ id: placeholderId, product: nextProduct, status: "selfie_processing" }, ...current]);
+    } else {
+      updateTryOnJob(placeholderId, { status: "selfie_processing", errorMessage: null });
+    }
+
+    try {
+      const selfie = await api.uploadTryOnSelfie(file, { userId });
+      if (selfie.status === "processing") {
+        await api.waitForSelfie(selfie.selfieId, { userId });
+      }
+      await runTryOn(nextProduct, selfie.selfieId, placeholderId);
+    } catch (error) {
+      updateTryOnJob(placeholderId, {
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : "Selfie upload failed",
+      });
+    }
   };
 
   const startTask = (index) => {
@@ -864,10 +1021,106 @@ export default function OpenCommerceLens() {
     }
   };
 
-  const approve = async () => {
-    const targetPurchase = checkoutPurchase;
+  const mergeCheckout = (checkout) => {
+    if (!checkout?.id) return;
+    const normalized = { ...checkout, status: checkoutApi.normalizeCheckoutStatus(checkout.status) };
+    setCheckouts((current) => {
+      const index = current.findIndex((item) => item.id === normalized.id);
+      if (index < 0) return [normalized, ...current];
+      const next = [...current];
+      next[index] = { ...next[index], ...normalized };
+      return next;
+    });
+  };
+
+  const handleCheckoutTransition = async (checkout) => {
+    if (!checkout?.id) return;
+    const status = checkoutApi.normalizeCheckoutStatus(checkout.status);
+    const nextCheckout = { ...checkout, status };
+    mergeCheckout(nextCheckout);
+    setActiveCheckout(nextCheckout);
+    setApprovalStatus(status);
+
+    if (status === "approved" && !approvalHandledRef.current.has(checkout.id)) {
+      approvalHandledRef.current.add(checkout.id);
+      showPaymentNotice("approved");
+      setTab("chat");
+      setMode((current) => current === "checkout" || current === "processing" ? (visible.length ? "results" : "discover") : current);
+      setMessages((current) => [
+        ...current,
+        {
+          id: `checkout-approved-${checkout.id}`,
+          role: "assistant",
+          type: "text",
+          text: `Prava approved ${checkout.currency || "USD"} ${Number(checkout.total || 0).toFixed(2)} for ${checkout.merchantName || "your checkout"}. Merchant confirmation is still pending.`,
+        },
+      ]);
+    }
+
+    if (status === "paid" && !paidHandledRef.current.has(checkout.id)) {
+      paidHandledRef.current.add(checkout.id);
+      showPaymentNotice("paid");
+      setTab("chat");
+      const cartItemIds = [...new Set((checkout.items || []).map((item) => item?.cartItemId).filter(Boolean))];
+      if (cartItemIds.length > 0) {
+        await Promise.allSettled(cartItemIds.map((itemId) => api.removeCartItem(itemId, { sessionId, userId })));
+        await refreshLibrary();
+      }
+      setMessages((current) => [
+        ...current,
+        {
+          id: `checkout-paid-${checkout.id}`,
+          role: "assistant",
+          type: "text",
+          text: `Payment completed for ${checkout.merchantName || "your checkout"}. Your order total was ${checkout.currency || "USD"} ${Number(checkout.total || 0).toFixed(2)}.`,
+        },
+      ]);
+    }
+
+    if (status === "failed") {
+      setApprovalError(checkout.failureMessage || "The merchant payment failed. Your cart is unchanged.");
+    }
+  };
+
+  const syncCheckoutRecord = async (checkout = activeCheckout) => {
+    if (!checkout?.id) return null;
+    try {
+      const result = await checkoutApi.syncCheckout(checkout.id, { userId });
+      const nextCheckout = result?.checkout;
+      if (nextCheckout) await handleCheckoutTransition(nextCheckout);
+      return nextCheckout || null;
+    } catch (error) {
+      setApprovalError(error instanceof Error ? error.message : "Failed to synchronize checkout");
+      return null;
+    }
+  };
+
+  const approve = async (purchaseOverride = null) => {
+    const hasPurchaseOverride = Boolean(purchaseOverride?.merchantName || purchaseOverride?.merchantUrl);
+    const targetPurchase = hasPurchaseOverride ? buildCheckoutPurchase([], purchaseOverride) : checkoutPurchase;
     if (!targetPurchase) {
       setApprovalError("No checkout details available.");
+      return;
+    }
+
+    const existingPaymentSessionId = approvalSession?.id || pendingPurchase?.paymentSessionId || pendingPurchase?.purchaseIntentId || null;
+    const existingApprovalUrl = approvalSession?.approvalUrl || pendingPurchase?.approvalUrl || null;
+    const canReuseExisting = !hasPurchaseOverride
+      && existingPaymentSessionId
+      && existingApprovalUrl
+      && !["failed", "expired", "cancelled", "paid"].includes(checkoutApi.normalizeCheckoutStatus(approvalStatus));
+
+    if (canReuseExisting) {
+      const existingSession = {
+        ...(pendingPurchase || {}),
+        ...(approvalSession || {}),
+        id: existingPaymentSessionId,
+        approvalUrl: existingApprovalUrl,
+      };
+      setApprovalSession(existingSession);
+      setApprovalStatus("awaiting_approval");
+      setApprovalOpen(true);
+      setMode("checkout");
       return;
     }
 
@@ -901,9 +1154,28 @@ export default function OpenCommerceLens() {
         totalAmount: Number(targetPurchase.totalAmount || 0),
         items: targetPurchase.items || [],
       }));
-      setApprovalStatus("pending");
+      const nextCheckout = createdSession?.checkoutId ? {
+        id: createdSession.checkoutId,
+        paymentSessionId: createdSession.id,
+        providerSessionId: createdSession.providerSessionId || null,
+        providerOrderId: createdSession.providerCheckoutId || null,
+        merchantName: targetPurchase.merchantName,
+        merchantUrl: targetPurchase.merchantUrl,
+        merchantCountry: targetPurchase.merchantCountry,
+        currency: targetPurchase.currency || "USD",
+        total: Number(targetPurchase.totalAmount || 0),
+        items: targetPurchase.items || [],
+        status: "awaiting_approval",
+        createdAt: new Date().toISOString(),
+      } : null;
+      if (nextCheckout) {
+        mergeCheckout(nextCheckout);
+        setActiveCheckout(nextCheckout);
+      }
+      setApprovalStatus("awaiting_approval");
       setApprovalOpen(true);
       setMode("checkout");
+      refreshCheckouts();
     } catch (error) {
       setApprovalError(error instanceof Error ? error.message : "Failed to create Prava session");
     } finally {
@@ -912,41 +1184,38 @@ export default function OpenCommerceLens() {
   };
 
   const refreshApprovalStatus = async () => {
-    if (!approvalSession?.id) return;
+    if (activeCheckout?.id) return syncCheckoutRecord(activeCheckout);
+    if (!approvalSession?.id) return null;
 
     try {
       const result = await pravaApi.getPravaPaymentResult(approvalSession.id, { sessionId, userId });
-      const remoteStatus = String(result?.remote?.status || result?.local?.status || "pending").toLowerCase();
-      setApprovalStatus(remoteStatus);
-
-      const txnRefId = result?.remote?.transactions?.[0]?.line_items?.[0]?.txn_ref_id || result?.remote?.transactions?.[0]?.txn_id;
-      if (txnRefId && remoteStatus === "completed") {
-        try {
-          await pravaApi.reportPravaPaymentStatus(
-            approvalSession.id,
-            { txnRefId, status: "APPROVED" },
-            { sessionId, userId }
-          );
-        } catch {
-          // Ignore report failures here; the approval session is already complete.
-        }
+      const checkout = result?.checkout;
+      if (checkout) {
+        await handleCheckoutTransition(checkout);
+        return checkout;
       }
-
-      if (remoteStatus === "completed") {
-        handlePaymentSuccess();
-      }
+      const status = checkoutApi.normalizeCheckoutStatus(result?.remote?.status || result?.local?.status || "pending");
+      setApprovalStatus(status);
+      return null;
     } catch (error) {
       setApprovalError(error instanceof Error ? error.message : "Failed to refresh Prava status");
+      return null;
     }
   };
 
   useEffect(() => {
-    if (!approvalOpen || !approvalSession?.id) return undefined;
+    const activeStatus = checkoutApi.normalizeCheckoutStatus(activeCheckout?.status || approvalStatus);
+    const canPollCheckout = activeCheckout?.id && checkoutApi.ACTIVE_CHECKOUT_STATUSES.has(activeStatus);
+    const canPollPaymentSession = !activeCheckout?.id && approvalSession?.id && activeStatus === "awaiting_approval";
+    if (!canPollCheckout && !canPollPaymentSession) return undefined;
 
     let alive = true;
+    let inFlight = false;
     const tick = async () => {
-      if (!alive) return;
+      if (!alive || inFlight) return;
+      inFlight = true;
       await refreshApprovalStatus();
+      inFlight = false;
     };
 
     tick();
@@ -956,10 +1225,12 @@ export default function OpenCommerceLens() {
       alive = false;
       clearInterval(timer);
     };
-  }, [approvalOpen, approvalSession?.id]);
+  }, [activeCheckout?.id, activeCheckout?.status, approvalSession?.id, approvalStatus]);
 
   useEffect(() => {
     return () => {
+      tryOnControllersRef.current.forEach((controller) => controller.abort());
+      tryOnControllersRef.current.clear();
       if (paymentSuccessTimerRef.current) {
         clearTimeout(paymentSuccessTimerRef.current);
       }
@@ -1002,6 +1273,7 @@ export default function OpenCommerceLens() {
         product={selected}
         onBack={() => setMode("results")}
         onMode={setMode}
+        onTry={startTry}
       />
     ) : mode === "comparison" ? (
       <ComparisonView
@@ -1014,12 +1286,16 @@ export default function OpenCommerceLens() {
         product={selected || products[0]}
         jobs={jobs}
         onMode={setMode}
+        onUploadSelfie={uploadTryOnSelfie}
+        onRetry={startTry}
       />
     ) : mode === "checkout" ? (
       <Checkout
         items={cart}
         setItems={setCart}
         purchase={pendingPurchase || checkoutPurchase}
+        checkout={activeCheckout}
+        checkoutStatus={activeCheckout?.status || approvalStatus}
         approvalSession={approvalSession}
         approvalLoading={approvalLoading}
         approvalError={approvalError}
@@ -1032,7 +1308,14 @@ export default function OpenCommerceLens() {
           }
         }}
         onRefreshStatus={refreshApprovalStatus}
-        onDismissApproval={() => setApprovalOpen(false)}
+        onSyncCheckout={() => activeCheckout?.id ? syncCheckoutRecord(activeCheckout) : refreshApprovalStatus()}
+        onDismissApproval={() => {
+          setApprovalOpen(false);
+          if (["approved", "paid"].includes(checkoutApi.normalizeCheckoutStatus(activeCheckout?.status || approvalStatus))) {
+            setTab("chat");
+            setMode(visible.length ? "results" : "discover");
+          }
+        }}
       />
     ) : mode === "processing" ? (
       <CheckoutProgress step={progress} orders={merchantNames} />
@@ -1050,19 +1333,39 @@ export default function OpenCommerceLens() {
         onLogout={logout}
         cartCount={cartCount}
         savedCount={savedCount}
+        checkoutCount={activeCheckoutCount}
         onOpenCart={() => openLibrary("cart")}
         onOpenSaved={() => openLibrary("saved")}
+        onOpenCheckouts={() => openLibrary("checkouts")}
       />
       <LibraryDrawer
         open={libraryOpen}
         onOpenChange={setLibraryOpen}
         activeTab={libraryTab}
-        onTabChange={setLibraryTab}
+        onTabChange={(nextTab) => {
+          setLibraryTab(nextTab);
+          if (nextTab === "checkouts") refreshCheckouts();
+        }}
         cartItems={cart}
         savedItems={savedProducts}
+        checkoutItems={checkouts}
+        checkoutsLoading={checkoutsLoading}
+        checkoutsError={checkoutsError}
         onRemoveCartItem={handleRemoveCartItem}
         onRemoveSavedItem={handleRemoveSavedProduct}
         onAddToCart={handleAddToCart}
+        onUpdateCartQuantity={handleUpdateCartQuantity}
+        onRefreshCheckouts={refreshCheckouts}
+        onSyncCheckout={syncCheckoutRecord}
+        onRetryCheckout={(checkout) => {
+          setLibraryOpen(false);
+          setApprovalSession(null);
+          setActiveCheckout(null);
+          setApprovalStatus("idle");
+          setPendingPurchase(checkout);
+          setMode("checkout");
+          approve(checkout);
+        }}
         onSelectProduct={(product) => {
           setSelected(normalizeProduct(product));
           setMode("product");
@@ -1144,6 +1447,7 @@ export default function OpenCommerceLens() {
               <PravaApproval
                 purchase={pendingPurchase || checkoutPurchase}
                 session={approvalSession}
+                status={activeCheckout?.status || approvalStatus}
                 isLoading={approvalLoading}
                 error={approvalError}
                 onApprove={approve}
@@ -1154,7 +1458,12 @@ export default function OpenCommerceLens() {
                   }
                 }}
                 onRefreshStatus={refreshApprovalStatus}
-                onDismiss={() => setApprovalOpen(false)}
+                onDismiss={() => {
+                  setApprovalOpen(false);
+                  if (["approved", "paid"].includes(checkoutApi.normalizeCheckoutStatus(activeCheckout?.status || approvalStatus))) {
+                    setTab("chat");
+                  }
+                }}
               />
               <div className="mt-4 rounded-2xl border border-border bg-card p-4 text-xs text-muted-foreground">
                 <p className="font-medium text-foreground">Status</p>
@@ -1168,9 +1477,11 @@ export default function OpenCommerceLens() {
         <DialogContent className="max-w-sm p-0 overflow-hidden">
           <div className="p-6 text-center">
             <DialogHeader>
-              <DialogTitle>Payment successful</DialogTitle>
+              <DialogTitle>{paymentSuccessStatus === "paid" ? "Payment successful" : "Payment approved"}</DialogTitle>
               <DialogDescription>
-                Prava confirmed your checkout and the app will return to shopping automatically.
+                {paymentSuccessStatus === "paid"
+                  ? "The merchant confirmed your payment."
+                  : "Prava approved your payment. Merchant confirmation is still pending, and you can continue chatting."}
               </DialogDescription>
             </DialogHeader>
           </div>

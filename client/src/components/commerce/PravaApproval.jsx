@@ -1,4 +1,5 @@
-import { ExternalLink, Lock, RotateCcw, ShieldCheck } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock3, ExternalLink, Lock, RotateCcw, ShieldCheck } from "lucide-react";
+import { normalizeCheckoutStatus } from "@/services/checkoutService";
 
 function formatAmount(amount, currency = "USD") {
   const value = Number(amount || 0);
@@ -22,6 +23,7 @@ export default function PravaApproval({
   onOpenApproval,
   onRefreshStatus,
   onDismiss,
+  status,
 }) {
   const activePurchase = purchase || session || {};
   const amount = Number(activePurchase?.totalAmount ?? activePurchase?.total ?? 0);
@@ -31,6 +33,13 @@ export default function PravaApproval({
   const internalSessionId = session?.id || activePurchase?.id || null;
   const providerSessionId = session?.providerSessionId || activePurchase?.providerSessionId || null;
   const providerOrderId = session?.providerCheckoutId || activePurchase?.providerCheckoutId || null;
+  const checkoutStatus = normalizeCheckoutStatus(status || session?.status || activePurchase?.status || "created");
+  const isAwaitingApproval = checkoutStatus === "awaiting_approval";
+  const isApproved = checkoutStatus === "approved";
+  const isPaid = checkoutStatus === "paid";
+  const isFailed = checkoutStatus === "failed";
+  const isExpired = checkoutStatus === "expired" || checkoutStatus === "cancelled";
+  const canPrepare = !internalSessionId || checkoutStatus === "created" || checkoutStatus === "draft" || checkoutStatus === "idle";
 
   return (
     <div className="border border-border rounded-[20px] p-4 bg-card shadow-card">
@@ -38,11 +47,31 @@ export default function PravaApproval({
         <ShieldCheck className="text-primary" size={16} />
         Prava approval
       </h3>
-      <p className="text-[10px] text-muted-foreground mt-1">
-        Authorize OpenCommerceLens to spend up to {formatAmount(amount, currency)} for {merchant}.
-      </p>
+      {isApproved || isPaid ? (
+        <div className="mt-3 flex gap-2 rounded-2xl border border-border bg-background/60 p-3">
+          <CheckCircle2 className="mt-0.5 text-emerald-500" size={16} />
+          <div>
+            <p className="text-xs font-medium">{isPaid ? "Payment completed" : "Payment approved"}</p>
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              {isPaid ? "The merchant payment has been confirmed." : "Prava approved the payment. Merchant confirmation is still pending."}
+            </p>
+          </div>
+        </div>
+      ) : isFailed || isExpired ? (
+        <div className="mt-3 flex gap-2 rounded-2xl border border-destructive/30 bg-destructive/5 p-3">
+          <AlertCircle className="mt-0.5 text-destructive" size={16} />
+          <div>
+            <p className="text-xs font-medium">{isExpired ? "Approval expired" : "Payment failed"}</p>
+            <p className="mt-1 text-[10px] text-muted-foreground">{error || "Your cart is unchanged. You can prepare a new payment session."}</p>
+          </div>
+        </div>
+      ) : (
+        <p className="text-[10px] text-muted-foreground mt-1">
+          Authorize OpenCommerceLens to spend up to {formatAmount(amount, currency)} for {merchant}.
+        </p>
+      )}
 
-      {[
+      {!isApproved && !isPaid && !isFailed && !isExpired && [
         "No substitutions",
         "Stop if total changes",
         "Require merchant confirmation",
@@ -61,12 +90,14 @@ export default function PravaApproval({
         {error && <p className="text-destructive">{error}</p>}
       </div>
 
-      <button onClick={onApprove} disabled={isLoading} className="primary w-full mt-4 disabled:opacity-60">
-        <Lock size={14} />
-        {isLoading ? "Preparing Prava session..." : `Approve ${formatAmount(amount, currency)} with Prava`}
-      </button>
+      {(canPrepare || isFailed || isExpired) && (
+        <button onClick={onApprove} disabled={isLoading} className="primary w-full mt-4 disabled:opacity-60">
+          <Lock size={14} />
+          {isLoading ? "Preparing Prava session..." : `${isFailed || isExpired ? "Retry" : "Approve"} ${formatAmount(amount, currency)} with Prava`}
+        </button>
+      )}
 
-      <div className="mt-3 flex gap-2">
+      {(isAwaitingApproval || isApproved) && <div className="mt-3 flex gap-2">
         <button
           type="button"
           onClick={onOpenApproval}
@@ -84,10 +115,16 @@ export default function PravaApproval({
           <RotateCcw size={13} />
           Refresh
         </button>
-      </div>
+      </div>}
+
+      {isAwaitingApproval && (
+        <p className="mt-3 inline-flex items-center gap-2 text-[10px] text-muted-foreground">
+          <Clock3 size={12} /> Waiting for approval in Prava
+        </p>
+      )}
 
       <button onClick={onDismiss} className="w-full text-xs text-primary mt-3">
-        Return to checkout
+        {isApproved || isPaid ? "Return to chat" : "Return to checkout"}
       </button>
     </div>
   );

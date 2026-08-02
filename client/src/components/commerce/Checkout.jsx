@@ -6,6 +6,8 @@ export default function Checkout({
   items = [],
   setItems,
   purchase,
+  checkout,
+  checkoutStatus,
   onApprove,
   onBack,
   approvalSession,
@@ -13,6 +15,7 @@ export default function Checkout({
   approvalError = "",
   onOpenApproval,
   onRefreshStatus,
+  onSyncCheckout,
   onDismissApproval,
 }) {
   const groups = items.reduce((acc, item) => {
@@ -43,13 +46,14 @@ export default function Checkout({
           <OrderSummary items={items} purchase={purchase} session={approvalSession} />
           <div className="mt-5 space-y-3">
             <PravaApproval
-              purchase={purchase}
+              purchase={purchase || checkout}
               session={approvalSession}
+              status={checkoutStatus || checkout?.status}
               isLoading={approvalLoading}
               error={approvalError}
               onApprove={onApprove}
               onOpenApproval={onOpenApproval}
-              onRefreshStatus={onRefreshStatus}
+              onRefreshStatus={onSyncCheckout || onRefreshStatus}
               onDismiss={onDismissApproval || onBack}
             />
           </div>

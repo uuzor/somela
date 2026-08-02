@@ -84,7 +84,7 @@ function getVariantOptions(product) {
   };
 }
 
-export default function ProductDetail({ product, onBack, onMode }) {
+export default function ProductDetail({ product, onBack, onMode, onTry }) {
   const images = useMemo(() => getImages(product), [product]);
   const [imageIndex, setImageIndex] = useState(0);
   const title = getTitle(product);
@@ -177,7 +177,7 @@ export default function ProductDetail({ product, onBack, onMode }) {
             <button type="button" onClick={() => onMode("comparison")} className="control">
               <Scale size={15} />Compare
             </button>
-            <button type="button" onClick={() => onMode("tryon")} className="primary" disabled={!available}>
+            <button type="button" onClick={() => onTry?.(product)} className="primary" disabled={!available}>
               <Sparkles size={15} />Try on
             </button>
             <button type="button" onClick={() => onMode("checkout")} className="primary" disabled={!available}>
