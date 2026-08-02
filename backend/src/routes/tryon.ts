@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { db, tryonTasks, userSelfies, products } from "../db/index.js";
+import { productSummarySelect } from "../db/product-select.js";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { TryonRequestSchema } from "../types/api.js";
@@ -106,7 +107,7 @@ tryonRouter.post("/multi", async (req, res) => {
     // Get all products
     const productRecords = await Promise.all(
       input.productIds.map(id => 
-        db.select().from(products).where(eq(products.id, id)).limit(1)
+        db.select(productSummarySelect).from(products).where(eq(products.id, id)).limit(1)
       )
     );
     

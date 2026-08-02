@@ -1,4 +1,4 @@
-﻿import "dotenv/config";
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { catalogRouter } from "./routes/catalog.js";
@@ -9,8 +9,10 @@ import { preferencesRouter } from "./routes/preferences.js";
 import { visualSearchRouter } from "./routes/visual-search.js";
 import { sessionsRouter } from "./routes/sessions.js";
 import { cartRouter } from "./routes/cart.js";
+import { savedProductsRouter } from "./routes/saved-products.js";
 import { uploadRouter } from "./routes/upload.js";
 import { canvasRouter } from "./routes/canvas.js";
+import { paymentsRouter } from "./routes/payments.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -52,8 +54,10 @@ app.use("/api/preferences", preferencesRouter);
 app.use("/api/visual-search", visualSearchRouter);
 app.use("/api/sessions", sessionsRouter);
 app.use("/api/cart", cartRouter);
+app.use("/api/saved-products", savedProductsRouter);
 app.use("/api/upload", uploadRouter); // Serves /api/upload/selfie, /api/upload/image, /api/upload/from-url
 app.use("/api/canvas", canvasRouter);
+app.use("/api/payments", paymentsRouter);
 
 // Error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -66,8 +70,10 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`ðŸš€ OpenCommerceLens backend running on http://localhost:${PORT}`);
+  console.log(`🚀 OpenCommerceLens backend running on http://localhost:${PORT}`);
   console.log(`   Health: http://localhost:${PORT}/health`);
 });
 
 export default app;
+
+

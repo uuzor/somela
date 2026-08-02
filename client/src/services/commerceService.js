@@ -253,21 +253,7 @@ export async function getTryOnStatus(job, options = {}) {
 }
 
 export async function preparePurchase(options = {}) {
-  try {
-    if (options.userId || options.sessionId) {
-      const query = options.sessionId ? { sessionId: options.sessionId } : undefined;
-      const data = await request("/api/cart", {
-        query,
-        headers: userHeaders(options.userId),
-      });
-      return data.cart?.items || cartSeed;
-    }
-  } catch {
-    // fall through to demo data
-  }
-
-  await wait(500);
-  return cartSeed;
+  return fetchCartItems(options);
 }
 
 export async function createPravaApproval() {
@@ -286,7 +272,206 @@ export async function completeCheckout() {
   }));
 }
 
+
+function getProductId(product) {
+  return product?.id || product?.productId || null;
+}
+
+function getPrimaryImage(product) {
+  if (!product) return "";
+  if (product.primaryImage) return product.primaryImage;
+  if (product.image) return product.image;
+  if (Array.isArray(product.images) && product.images.length > 0) return product.images[0];
+  return "";
+}
+
+function getDisplayPrice(product) {
+  return product?.minPrice ?? product?.price ?? product?.displayPrice ?? null;
+}
+
+function normalizeCartItem(product, overrides = {}) {
+  const source = product || {};
+  const numericPrice = Number.parseFloat(String(getDisplayPrice(source) ?? overrides.price ?? 0).replace(/[^0-9.-]/g, ""));
+  return {
+    cartId: overrides.cartId || source.cartId || source.itemId || source.id || randomId(),
+    productId: getProductId(source),
+    qty: Number(overrides.qty ?? overrides.quantity ?? source.qty ?? source.quantity ?? 1),
+    name: source.title || source.name || "Item",
+    merchant: source.vendor || source.merchantName || source.merchant || source.shopName || source.shop || "Store",
+    price: Number.isFinite(numericPrice) ? numericPrice : 0,
+    image: getPrimaryImage(source),
+    color: source.color || overrides.color || "",
+    size: source.size || overrides.size || "",
+    available: source.available ?? true,
+  };
+}
+
+function normalizeBackendCartItem(item) {
+  if (!item) return null;
+  const product = item.product || {};
+  return normalizeCartItem({
+    ...product,
+    id: item.productId || product.id,
+    price: product.minPrice ?? product.price ?? item.price,
+    images: product.images,
+    primaryImage: product.primaryImage,
+    vendor: product.vendor,
+    merchant: product.merchant,
+    available: product.available,
+  }, {
+    cartId: item.itemId || item.cartItemId || item.id,
+    quantity: item.quantity,
+  });
+}
+
+function normalizeSavedProductItem(item) {
+  if (!item) return null;
+  const product = item.product || item;
+  return {
+    savedId: item.savedId || item.id || randomId(),
+    productId: item.productId || product?.id || null,
+    product: normalizeProduct(product),
+  };
+}
+
+export async function fetchCartItems(options = {}) {
+  try {
+    if (options.userId || options.sessionId) {
+      const data = await request("/api/cart", {
+        query: options.sessionId ? { sessionId: options.sessionId } : undefined,
+        headers: userHeaders(options.userId),
+      });
+      const items = Array.isArray(data.cart?.items) ? data.cart.items : [];
+      return items.map(normalizeBackendCartItem).filter(Boolean);
+    }
+  } catch {
+    // fall through to a scoped fallback below
+  }
+
+  return options.userId || options.sessionId ? [] : cartSeed;
+}
+
+export async function fetchSavedProducts(options = {}) {
+  try {
+    if (options.userId || options.sessionId) {
+      const data = await request("/api/saved-products", {
+        query: options.sessionId ? { sessionId: options.sessionId } : undefined,
+        headers: userHeaders(options.userId),
+      });
+      const items = Array.isArray(data.savedProducts) ? data.savedProducts : [];
+      return items.map(normalizeSavedProductItem).filter(Boolean);
+    }
+  } catch {
+    // fall through to empty list
+  }
+
+  return [];
+}
+
+function normalizeCartMutationResponse(data, fallbackProduct) {
+  const item = data?.savedProduct || data?.cartItem || data?.item || data;
+  const normalized = normalizeBackendCartItem(item);
+  if (normalized) return normalized;
+  return normalizeCartItem(fallbackProduct, {
+    cartId: data?.itemId || data?.cartItemId || data?.id,
+    quantity: data?.quantity,
+  });
+}
+
+function normalizeSavedMutationResponse(data, fallbackProduct) {
+  const item = data?.savedProduct || data?.item || data;
+  const normalized = normalizeSavedProductItem(item);
+  if (normalized) return normalized;
+  return {
+    savedId: data?.savedId || data?.id || randomId(),
+    productId: getProductId(fallbackProduct),
+    product: normalizeProduct(fallbackProduct),
+  };
+}
+
+export async function addToCart(product, options = {}) {
+  const productId = getProductId(product);
+  if (!productId) {
+    throw new Error("Product ID is required");
+  }
+
+  const data = await request("/api/cart/items", {
+    method: "POST",
+    query: options.sessionId ? { sessionId: options.sessionId } : undefined,
+    headers: userHeaders(options.userId),
+    body: {
+      productId,
+      variantId: options.variantId,
+      quantity: options.quantity || 1,
+      sessionId: options.sessionId,
+    },
+  });
+
+  return normalizeCartMutationResponse(data, product);
+}
+
+export async function updateCartItemQuantity(itemId, quantity, options = {}) {
+  if (!itemId) {
+    throw new Error("Cart item ID is required");
+  }
+
+  await request(`/api/cart/items/${encodeURIComponent(itemId)}`, {
+    method: "PUT",
+    query: options.sessionId ? { sessionId: options.sessionId } : undefined,
+    headers: userHeaders(options.userId),
+    body: {
+      quantity,
+    },
+  });
+
+  return true;
+}
+
+export async function removeCartItem(itemId, options = {}) {
+  if (!itemId) {
+    throw new Error("Cart item ID is required");
+  }
+
+  await request(`/api/cart/items/${encodeURIComponent(itemId)}`, {
+    method: "DELETE",
+    query: options.sessionId ? { sessionId: options.sessionId } : undefined,
+    headers: userHeaders(options.userId),
+  });
+
+  return true;
+}
+
+export async function saveProduct(product, options = {}) {
+  const productId = getProductId(product);
+  if (!productId) {
+    throw new Error("Product ID is required");
+  }
+
+  const data = await request("/api/saved-products/items", {
+    method: "POST",
+    query: options.sessionId ? { sessionId: options.sessionId } : undefined,
+    headers: userHeaders(options.userId),
+    body: {
+      productId,
+      sessionId: options.sessionId,
+    },
+  });
+
+  return normalizeSavedMutationResponse(data, product);
+}
+
+export async function removeSavedProduct(productId, options = {}) {
+  await request("/api/saved-products/items/" + encodeURIComponent(productId), {
+    method: "DELETE",
+    query: options.sessionId ? { sessionId: options.sessionId } : undefined,
+    headers: userHeaders(options.userId),
+  });
+  return true;
+}
+
 export async function getOrderStatus(id) {
   await wait(300);
   return { id, status: "confirmed" };
 }
+
+

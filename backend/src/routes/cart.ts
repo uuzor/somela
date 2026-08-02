@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { db, carts, cartItems, products } from "../db/index.js";
+import { db, carts, cartItems, products, shops } from "../db/index.js";
+import { productSummarySelect } from "../db/product-select.js";
 import { eq, and, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AddCartItemSchema, UpdateCartItemSchema } from "../types/api.js";
@@ -64,10 +65,16 @@ async function getCartForAuth(userId?: string | null, sessionId?: string | null)
         minPrice: products.minPrice,
         maxPrice: products.maxPrice,
         url: products.url,
+        merchantName: shops.name,
+        merchantDomain: shops.domain,
+        merchantUrl: shops.baseUrl,
+        shopId: products.shopId,
+        shop: products.shop,
       },
     })
     .from(cartItems)
     .innerJoin(products, eq(cartItems.productId, products.id))
+    .innerJoin(shops, eq(products.shop, shops.shopId))
     .where(eq(cartItems.cartId, cart.id));
   return {
     cartId: cart.id,
@@ -121,7 +128,12 @@ cartRouter.post("/items", async (req, res) => {
         .set({ quantity: existing.quantity + body.quantity, updatedAt: new Date() })
         .where(eq(cartItems.id, existing.id))
         .returning();
-      const [product] = await db.select().from(products).where(eq(products.id, updated.productId)).limit(1);
+      const [product] = await db.select({
+        ...productSummarySelect,
+        merchantName: shops.name,
+        merchantDomain: shops.domain,
+        merchantUrl: shops.baseUrl,
+      }).from(products).innerJoin(shops, eq(products.shop, shops.shopId)).where(eq(products.id, updated.productId)).limit(1);
       return res.status(200).json({
         itemId: updated.id,
         productId: updated.productId,
@@ -134,6 +146,10 @@ cartRouter.post("/items", async (req, res) => {
           minPrice: product.minPrice ? parseFloat(String(product.minPrice)) : null,
           maxPrice: product.maxPrice ? parseFloat(String(product.maxPrice)) : null,
           url: product.url,
+          merchantName: product.merchantName,
+          merchantDomain: product.merchantDomain,
+          shopId: product.shopId,
+          shop: product.shop,
         },
       });
     }
@@ -148,7 +164,12 @@ cartRouter.post("/items", async (req, res) => {
       })
       .returning();
 
-    const [product] = await db.select().from(products).where(eq(products.id, created.productId)).limit(1);
+    const [product] = await db.select({
+      ...productSummarySelect,
+      merchantName: shops.name,
+      merchantDomain: shops.domain,
+      merchantUrl: shops.baseUrl,
+    }).from(products).innerJoin(shops, eq(products.shop, shops.shopId)).where(eq(products.id, created.productId)).limit(1);
     return res.status(201).json({
       itemId: created.id,
       productId: created.productId,
@@ -161,6 +182,11 @@ cartRouter.post("/items", async (req, res) => {
         minPrice: product.minPrice ? parseFloat(String(product.minPrice)) : null,
         maxPrice: product.maxPrice ? parseFloat(String(product.maxPrice)) : null,
         url: product.url,
+        merchantName: product.merchantName,
+        merchantDomain: product.merchantDomain,
+        merchantUrl: product.merchantUrl,
+        shopId: product.shopId,
+        shop: product.shop,
       },
     });
   } catch (error) {

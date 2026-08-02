@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { db, conversations, cartItems, carts, products, userPreferences } from "../db/index.js";
+import { productSummarySelect } from "../db/product-select.js";
 import { desc, eq, and } from "drizzle-orm";
 import { resolveRequestIdentity } from "../middleware/supabaseAuth.js";
 
@@ -125,7 +126,7 @@ canvasRouter.get("/bootstrap", async (req, res) => {
     const { userId, sessionId } = await getActor(req);
 
     const [catalog, cart, conversation, preferences] = await Promise.all([
-      db.select().from(products).orderBy(desc(products.fetchedAt)).limit(12),
+      db.select(productSummarySelect).from(products).orderBy(desc(products.fetchedAt)).limit(12),
       getCartSnapshot(userId, sessionId),
       getConversationSnapshot(userId, sessionId),
       getPreferencesSnapshot(userId),

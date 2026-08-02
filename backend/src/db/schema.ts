@@ -5,6 +5,7 @@ import {
   timestamp,
   jsonb,
   numeric,
+  integer,
   serial,
   boolean,
   uuid,
@@ -12,6 +13,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
+import type { SessionKnowledge } from "../services/validation.js";
 
 // Note: Use lakebase_vector extension in Neon
 // Custom vector column type
@@ -23,7 +25,7 @@ type Vector1024 = string; // Stored as string "[1.0, 2.0, ...]"
 
 export const shops = pgTable("shops", {
   id: serial("id").primaryKey(),
-  shopId: varchar("shop_id", { length: 100 }).notNull().unique(), // e.g., "outdoor-voices"
+  shopId: varchar("shop_id", { length: 100 }).notNull(), // e.g., "outdoor-voices"
   name: varchar("name", { length: 255 }).notNull(),
   domain: varchar("domain", { length: 255 }).notNull(), // e.g., "outdoorvoices.com"
   baseUrl: varchar("base_url", { length: 500 }).notNull(),
@@ -31,7 +33,9 @@ export const shops = pgTable("shops", {
   lastFetchedAt: timestamp("last_fetched_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => ({
+  shopIdUnique: uniqueIndex("shops_shop_id_key").on(table.shopId),
+}));
 
 // Product variants table
 export const productVariants = pgTable("product_variants", {
@@ -48,7 +52,7 @@ export const productVariants = pgTable("product_variants", {
   price: numeric("price", { precision: 10, scale: 2 }),
   
   // Stock
-  stockQuantity: serial("stock_quantity"),
+  stockQuantity: integer("stock_quantity"),
   available: boolean("available").default(true),
   
   // Image
@@ -65,11 +69,15 @@ export const products = pgTable("products", {
   id: text("id").primaryKey(), // "{shopId}:{shopifyProductId}"
   shopId: varchar("shop_id", { length: 100 }).notNull(),
   shop: text("shop").notNull().references(() => shops.shopId),
+  handle: varchar("handle", { length: 255 }),
   
   // Core fields
   title: varchar("title", { length: 500 }).notNull(),
   description: text("description"),
   category: varchar("category", { length: 100 }), // yoga, top, bottom, dress, etc.
+  vendor: varchar("vendor", { length: 255 }),
+  productType: varchar("product_type", { length: 255 }),
+  status: varchar("status", { length: 50 }).default("active"),
   
   // Images
   images: jsonb("images").$type<string[]>().default([]),
@@ -77,10 +85,19 @@ export const products = pgTable("products", {
   
   // Variants (size/color combinations)
   variants: jsonb("variants").$type<ProductVariant[]>().default([]),
+  options: jsonb("options").$type<ProductOption[]>().default([]),
+  collections: jsonb("collections").$type<string[]>().default([]),
+  seo: jsonb("seo").$type<ProductSeo | null>().default(null),
   
   // Pricing
   minPrice: numeric("min_price", { precision: 10, scale: 2 }),
   maxPrice: numeric("max_price", { precision: 10, scale: 2 }),
+  compareAtPriceMin: numeric("compare_at_price_min", { precision: 10, scale: 2 }),
+  compareAtPriceMax: numeric("compare_at_price_max", { precision: 10, scale: 2 }),
+  onSale: boolean("on_sale").default(false),
+  totalInventory: integer("total_inventory"),
+  requiresShipping: boolean("requires_shipping"),
+  taxable: boolean("taxable"),
   
   // Metadata
   tags: jsonb("tags").$type<string[]>().default([]),
@@ -93,9 +110,13 @@ export const products = pgTable("products", {
 }, (table) => ({
   shopIdIdx: index("products_shop_id_idx").on(table.shopId),
   categoryIdx: index("products_category_idx").on(table.category),
+  vendorIdx: index("products_vendor_idx").on(table.vendor),
+  statusIdx: index("products_status_idx").on(table.status),
+  onSaleIdx: index("products_on_sale_idx").on(table.onSale),
   minPriceIdx: index("products_min_price_idx").on(table.minPrice),
 }));
 
+// ============================================================================
 // ============================================================================
 // PRODUCT EMBEDDINGS (Vector Search)
 // ============================================================================
@@ -108,14 +129,13 @@ export const productEmbeddings = pgTable("product_embeddings", {
   embeddedAt: timestamp("embedded_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-// ============================================================================
 // SESSIONS (Guest + Authenticated)
 // ============================================================================
 
 export const sessions = pgTable("sessions", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
-  sessionToken: varchar("session_token", { length: 255 }).notNull().unique(),
+  sessionToken: varchar("session_token", { length: 255 }).notNull(),
   
   // Auth type
   isGuest: boolean("is_guest").default(true).notNull(),
@@ -126,27 +146,29 @@ export const sessions = pgTable("sessions", {
   lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   userIdIdx: index("sessions_user_id_idx").on(table.userId),
-  sessionTokenIdx: uniqueIndex("sessions_token_idx").on(table.sessionToken),
+  sessionTokenIdx: uniqueIndex("sessions_session_token_key").on(table.sessionToken),
 }));
 
+// ============================================================================
 // ============================================================================
 // USERS
 // ============================================================================
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(), // Auth provider ID or generated
-  email: varchar("email", { length: 255 }).unique(),
+  email: varchar("email", { length: 255 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => ({
+  emailUnique: uniqueIndex("users_email_key").on(table.email),
+}));
 
-// ============================================================================
 // USER PREFERENCES
 // ============================================================================
 
 export const userPreferences = pgTable("user_preferences", {
   id: uuid("id").primaryKey().defaultRandom(),
-  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
   sessionId: text("session_id"), // Made optional for flexibility
   
   // Preference fields
@@ -174,7 +196,7 @@ export const userPreferences = pgTable("user_preferences", {
 
 export const userSelfies = pgTable("user_selfies", {
   id: uuid("id").primaryKey().defaultRandom(),
-  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
   imageUrl: text("image_url").notNull(),
   processedImageUrl: text("processed_image_url"), // After YouCam prep
   isDefault: boolean("is_default").default(false),
@@ -264,6 +286,7 @@ export const conversations = pgTable("conversations", {
   
   // State
   lastPreferences: jsonb("last_preferences").$type<Partial<UserPreferences>>(),
+  sessionKnowledge: jsonb("session_knowledge").$type<SessionKnowledge>().default({}),
   
   // Timestamps
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -295,7 +318,7 @@ export const cartItems = pgTable("cart_items", {
   cartId: uuid("cart_id").notNull().references(() => carts.id, { onDelete: "cascade" }),
   productId: text("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
   variantId: text("variant_id"),
-  quantity: serial("quantity").default(1).notNull(),
+  quantity: integer("quantity").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
@@ -307,13 +330,202 @@ export const cartItems = pgTable("cart_items", {
 // TYPE EXPORTS (for use in application code)
 // ============================================================================
 
+// ============================================================================
+// SAVED PRODUCTS / WISHLIST
+// ============================================================================
+
+export const savedProducts = pgTable("saved_products", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").references(() => sessions.id, { onDelete: "cascade" }),
+  productId: text("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("saved_products_user_id_idx").on(table.userId),
+  sessionIdIdx: index("saved_products_session_id_idx").on(table.sessionId),
+  productIdIdx: index("saved_products_product_id_idx").on(table.productId),
+  userProductUniqueIdx: uniqueIndex("saved_products_user_product_unique_idx").on(table.userId, table.productId),
+  sessionProductUniqueIdx: uniqueIndex("saved_products_session_product_unique_idx").on(table.sessionId, table.productId),
+}));
+
+// ============================================================================
+// PRAVA PAYMENTS
+// ============================================================================
+
+export const pravaConnections = pgTable("prava_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").references(() => sessions.id, { onDelete: "cascade" }),
+  provider: varchar("provider", { length: 50 }).notNull().default("prava"),
+  providerAccountId: text("provider_account_id"),
+  providerSubject: text("provider_subject"),
+  email: varchar("email", { length: 255 }),
+  displayName: varchar("display_name", { length: 255 }),
+  status: varchar("status", { length: 50 }).notNull().default("linked"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+  linkedAt: timestamp("linked_at", { withTimezone: true }).defaultNow().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("prava_connections_user_id_idx").on(table.userId),
+  sessionIdIdx: index("prava_connections_session_id_idx").on(table.sessionId),
+  providerAccountIdx: index("prava_connections_provider_account_id_idx").on(table.providerAccountId),
+}));
+
+export const pravaPaymentSessions = pgTable("prava_payment_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").references(() => sessions.id, { onDelete: "cascade" }),
+  cartId: uuid("cart_id").references(() => carts.id, { onDelete: "set null" }),
+  merchantName: varchar("merchant_name", { length: 255 }).notNull(),
+  merchantUrl: text("merchant_url").notNull(),
+  merchantCountry: varchar("merchant_country", { length: 2 }).notNull(),
+  totalAmount: numeric("total_amount", { precision: 12, scale: 2 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  status: varchar("status", { length: 50 }).notNull().default("draft"),
+  approvalUrl: text("approval_url"),
+  providerSessionId: text("provider_session_id"),
+  providerCheckoutId: text("provider_checkout_id"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("prava_payment_sessions_user_id_idx").on(table.userId),
+  sessionIdIdx: index("prava_payment_sessions_session_id_idx").on(table.sessionId),
+  statusIdx: index("prava_payment_sessions_status_idx").on(table.status),
+  providerSessionIdx: index("prava_payment_sessions_provider_session_id_idx").on(table.providerSessionId),
+}));
+
+export type CheckoutItemSnapshot = {
+  productId?: string | null;
+  cartItemId?: string | null;
+  variantId?: string | null;
+  name: string;
+  image?: string | null;
+  variant?: string | null;
+  unitPrice: number;
+  quantity: number;
+};
+
+export const checkouts = pgTable("checkouts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  checkoutGroupId: uuid("checkout_group_id").notNull().defaultRandom(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  sessionId: text("session_id"),
+  cartId: uuid("cart_id").references(() => carts.id, { onDelete: "set null" }),
+  paymentSessionId: uuid("payment_session_id").notNull().references(() => pravaPaymentSessions.id, { onDelete: "cascade" }),
+  merchantName: varchar("merchant_name", { length: 255 }).notNull(),
+  merchantUrl: text("merchant_url").notNull(),
+  merchantCountry: varchar("merchant_country", { length: 2 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  subtotal: numeric("subtotal", { precision: 12, scale: 2 }).notNull(),
+  shipping: numeric("shipping", { precision: 12, scale: 2 }).notNull().default("0"),
+  tax: numeric("tax", { precision: 12, scale: 2 }).notNull().default("0"),
+  total: numeric("total", { precision: 12, scale: 2 }).notNull(),
+  items: jsonb("items").$type<CheckoutItemSnapshot[]>().notNull().default([]),
+  status: varchar("status", { length: 50 }).notNull().default("created"),
+  providerSessionId: text("provider_session_id"),
+  providerOrderId: text("provider_order_id"),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  failedAt: timestamp("failed_at", { withTimezone: true }),
+  failureCode: text("failure_code"),
+  failureMessage: text("failure_message"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("checkouts_user_id_idx").on(table.userId),
+  sessionIdIdx: index("checkouts_session_id_idx").on(table.sessionId),
+  groupIdIdx: index("checkouts_group_id_idx").on(table.checkoutGroupId),
+  statusIdx: index("checkouts_status_idx").on(table.status),
+  createdAtIdx: index("checkouts_created_at_idx").on(table.createdAt),
+  paymentSessionUniqueIdx: uniqueIndex("checkouts_payment_session_id_key").on(table.paymentSessionId),
+  providerSessionIdx: index("checkouts_provider_session_id_idx").on(table.providerSessionId),
+  providerOrderIdx: index("checkouts_provider_order_id_idx").on(table.providerOrderId),
+}));
+
+export const pravaMandates = pgTable("prava_mandates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").references(() => sessions.id, { onDelete: "cascade" }),
+  scope: varchar("scope", { length: 20 }).notNull().default("listed"),
+  frequency: varchar("frequency", { length: 20 }).notNull().default("one_time"),
+  merchantName: varchar("merchant_name", { length: 255 }),
+  merchantUrl: text("merchant_url"),
+  merchantCountry: varchar("merchant_country", { length: 2 }),
+  amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  status: varchar("status", { length: 50 }).notNull().default("pending"),
+  approvalUrl: text("approval_url"),
+  providerMandateId: text("provider_mandate_id"),
+  validFrom: timestamp("valid_from", { withTimezone: true }).defaultNow().notNull(),
+  validUntil: timestamp("valid_until", { withTimezone: true }),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("prava_mandates_user_id_idx").on(table.userId),
+  sessionIdIdx: index("prava_mandates_session_id_idx").on(table.sessionId),
+  statusIdx: index("prava_mandates_status_idx").on(table.status),
+  providerMandateIdx: index("prava_mandates_provider_mandate_id_idx").on(table.providerMandateId),
+}));
+
+export const pravaTransactions = pgTable("prava_transactions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").references(() => sessions.id, { onDelete: "cascade" }),
+  paymentSessionId: uuid("payment_session_id").references(() => pravaPaymentSessions.id, { onDelete: "set null" }),
+  mandateId: uuid("mandate_id").references(() => pravaMandates.id, { onDelete: "set null" }),
+  merchantName: varchar("merchant_name", { length: 255 }).notNull(),
+  merchantUrl: text("merchant_url").notNull(),
+  merchantCountry: varchar("merchant_country", { length: 2 }).notNull(),
+  amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  status: varchar("status", { length: 50 }).notNull().default("pending"),
+  providerTransactionId: text("provider_transaction_id"),
+  approvalStatus: varchar("approval_status", { length: 50 }),
+  authorizationCode: text("authorization_code"),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("prava_transactions_user_id_idx").on(table.userId),
+  sessionIdIdx: index("prava_transactions_session_id_idx").on(table.sessionId),
+  statusIdx: index("prava_transactions_status_idx").on(table.status),
+  providerTransactionIdx: index("prava_transactions_provider_transaction_id_idx").on(table.providerTransactionId),
+}));
+
 export interface ProductVariant {
   id: string;
   title: string;
   price: number;
+  compareAtPrice?: number | null;
   available: boolean;
+  availableForSale?: boolean;
+  stockQuantity?: number | null;
   color?: string;
   size?: string;
+  barcode?: string | null;
+  requiresShipping?: boolean | null;
+  taxable?: boolean | null;
+  weight?: number | null;
+  weightUnit?: string | null;
+  image?: string | null;
+}
+
+export interface ProductOption {
+  name: string;
+  values: string[];
+}
+
+export interface ProductSeo {
+  title?: string | null;
+  description?: string | null;
 }
 
 export interface ChatMessage {
@@ -457,3 +669,11 @@ export const cartItemsRelations = relations(cartItems, ({ one }) => ({
     references: [products.id],
   }),
 }));
+
+
+
+
+
+
+
+

@@ -50,21 +50,31 @@ function firstImage(images, fallback = null) {
 export function normalizeProduct(raw = {}) {
   const images = toArray(raw.images).filter(Boolean);
   const variants = toArray(raw.variants);
+  const options = toArray(raw.options);
+  const collections = toArray(raw.collections).filter(Boolean);
   const minPrice = toNumber(raw.minPrice);
   const maxPrice = toNumber(raw.maxPrice);
-  const merchant = raw.merchant || raw.merchantName || raw.shopName || raw.shopId || null;
-  const image = firstImage(images, raw.image || raw.primaryImage || null);
+  const compareAtPriceMin = toNumber(raw.compareAtPriceMin ?? raw.compareAtPrice);
+  const compareAtPriceMax = toNumber(raw.compareAtPriceMax ?? raw.compareAtPrice);
+  const merchant = raw.vendor || raw.merchant || raw.merchantName || raw.shopName || raw.shopId || null;
+  const image = firstImage(images, raw.primaryImage || raw.image || null);
   const title = raw.title || raw.name || "Untitled product";
   const price = raw.price ?? formatPrice(minPrice, maxPrice, raw.currency);
-  const available = raw.available ?? raw.inStock ?? raw.status === "available";
+  const available = (raw.available ?? raw.inStock ?? raw.status === "available") || raw.status === "active";
+  const status = raw.status || (available ? "available" : "unavailable");
+  const onSale = Boolean(raw.onSale || (compareAtPriceMin != null && minPrice != null && compareAtPriceMin > minPrice));
 
   return {
-    id: raw.id || null,
+    id: raw.id || raw.productId || null,
+    productId: raw.productId || raw.id || null,
     shopId: raw.shopId || null,
+    handle: raw.handle || null,
     title,
     name: title,
     description: raw.description || "",
-    category: raw.category || null,
+    category: raw.category || raw.productType || null,
+    productType: raw.productType || null,
+    vendor: raw.vendor || null,
     images,
     image,
     primaryImage: image,
@@ -74,7 +84,12 @@ export function normalizeProduct(raw = {}) {
     currency: raw.currency || "USD",
     minPrice,
     maxPrice,
+    compareAtPriceMin,
+    compareAtPriceMax,
+    onSale,
     tags: toArray(raw.tags).filter(Boolean),
+    options,
+    collections,
     url: raw.url || null,
     variants,
     variantCount: variants.length,
@@ -84,7 +99,7 @@ export function normalizeProduct(raw = {}) {
     size: raw.size || variants.find((variant) => variant && variant.size)?.size || null,
     merchant,
     merchantName: merchant,
-    status: raw.status || (available ? "available" : "unavailable"),
+    status,
     source: raw.source || null,
     raw,
   };
@@ -176,3 +191,4 @@ export function normalizeCanvasBootstrap(raw = {}) {
 }
 
 export { CANVAS_MODES, CANVAS_TABS };
+

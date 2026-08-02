@@ -12,7 +12,26 @@ function getInitial(user) {
   return source.trim().charAt(0).toUpperCase();
 }
 
-export default function TopNavigation({ mode, onMode, enabled, user, onLogout }) {
+function CountBadge({ count }) {
+  if (!count) return null;
+  return (
+    <span className="absolute -top-1.5 -right-2 min-w-4 h-4 px-1 rounded-full bg-primary text-[10px] leading-4 text-white text-center">
+      {count > 99 ? '99+' : count}
+    </span>
+  );
+}
+
+export default function TopNavigation({
+  mode,
+  onMode,
+  enabled,
+  user,
+  onLogout,
+  cartCount = 0,
+  savedCount = 0,
+  onOpenCart,
+  onOpenSaved,
+}) {
   const name = getDisplayName(user);
   const email = user?.email || '';
   const initial = getInitial(user);
@@ -37,8 +56,26 @@ export default function TopNavigation({ mode, onMode, enabled, user, onLogout })
         ))}
       </nav>
       <div className="flex items-center gap-4 text-sm text-muted-foreground">
-        <button className="hidden sm:flex gap-2" type="button"><Heart size={16} />Saved</button>
-        <button className="hidden sm:flex gap-2" type="button"><ShoppingBag size={16} />Orders</button>
+        <div className="sm:hidden flex items-center gap-2">
+          <button type="button" onClick={onOpenSaved} className="relative rounded-full border border-border p-2 text-foreground">
+            <Heart size={16} />
+            <CountBadge count={savedCount} />
+          </button>
+          <button type="button" onClick={onOpenCart} className="relative rounded-full border border-border p-2 text-foreground">
+            <ShoppingBag size={16} />
+            <CountBadge count={cartCount} />
+          </button>
+        </div>
+        <button className="hidden sm:flex gap-2 items-center relative" type="button" onClick={onOpenSaved}>
+          <Heart size={16} />
+          Saved
+          <CountBadge count={savedCount} />
+        </button>
+        <button className="hidden sm:flex gap-2 items-center relative" type="button" onClick={onOpenCart}>
+          <ShoppingBag size={16} />
+          Cart
+          <CountBadge count={cartCount} />
+        </button>
         <div className="hidden md:flex items-center gap-3 rounded-full border border-border bg-background/70 px-3 py-1.5">
           <div className="text-right leading-tight">
             <div className="text-xs font-medium text-foreground">{name}</div>

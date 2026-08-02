@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, conversations, products, userPreferences, sessions } from "../db/index.js";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, desc } from "drizzle-orm";
 import { ChatRequestSchema } from "../types/api.js";
 import { strictRateLimit } from "../middleware/rateLimit.js";
 import { 
@@ -9,16 +9,81 @@ import {
   isAgentAvailable, 
   type ShoppingState, 
   type AgentMessage,
+  type SessionKnowledge,
   type StreamingEvent,
 } from "../services/agent.js";
 import { formatSSEMessage } from "../services/validation.js";
-import { resolveRequestIdentity } from "../middleware/supabaseAuth.js";
+import { resolveRequestIdentity, ensureUserExists } from "../middleware/supabaseAuth.js";
 
 export const chatRouter = Router();
 
 const logChatFlow = (requestId: string, step: string, meta?: unknown) => {
   console.log(`[CHAT_FLOW ${requestId}] ${step}`, meta ?? "");
 };
+
+
+function normalizeSessionKnowledge(raw: unknown): SessionKnowledge {
+  const value = (raw && typeof raw === "object") ? (raw as Partial<SessionKnowledge>) : {};
+  const next: SessionKnowledge = {
+    pendingConfirmation: "none",
+    lastProductIds: [],
+    ...value,
+  };
+
+  if (!next.pendingConfirmation && (next.purchaseIntentId || next.paymentSessionId || next.approvalUrl)) {
+    next.pendingConfirmation = "checkout";
+  }
+
+  return next;
+}
+
+function buildNextSessionKnowledge(args: {
+  previous: SessionKnowledge;
+  message: string;
+  uiPayload: any;
+  actions: any[];
+  chatState: string;
+}): SessionKnowledge {
+  const next: SessionKnowledge = {
+    ...args.previous,
+    lastMessage: args.message,
+    lastChatState: args.chatState as any,
+  };
+
+  if (args.uiPayload?.type === "confirm_purchase") {
+    next.pendingConfirmation = "checkout";
+    next.purchaseIntentId = args.uiPayload.purchase?.purchaseIntentId || args.uiPayload.purchase?.paymentSessionId || next.purchaseIntentId || null;
+    next.paymentSessionId = args.uiPayload.purchase?.paymentSessionId || args.uiPayload.purchase?.purchaseIntentId || next.paymentSessionId || null;
+    next.approvalUrl = args.uiPayload.purchase?.approvalUrl || next.approvalUrl || null;
+    next.lastAssistantIntent = "prepare_purchase";
+  } else if (args.uiPayload?.type === "payment_pending") {
+    next.pendingConfirmation = "checkout";
+    next.purchaseIntentId = args.uiPayload.purchaseIntentId || next.purchaseIntentId || null;
+    next.paymentSessionId = args.uiPayload.purchaseIntentId || next.paymentSessionId || null;
+    next.approvalUrl = args.uiPayload.approvalUrl || next.approvalUrl || null;
+    next.lastAssistantIntent = "execute_prava_checkout";
+  } else if (args.chatState === "tryon") {
+    next.pendingConfirmation = "try_on";
+    next.lastAssistantIntent = "suggest_try_on";
+  } else if (args.chatState === "processing" || args.chatState === "confirmation") {
+    next.pendingConfirmation = "none";
+  }
+
+  if (args.uiPayload?.type === "replace_catalog" && Array.isArray(args.uiPayload.products)) {
+    next.lastProductIds = args.uiPayload.products.map((product: any) => product.productId).filter(Boolean);
+    next.lastAssistantIntent = "search_catalog";
+    next.pendingConfirmation = "none";
+    next.purchaseIntentId = null;
+    next.paymentSessionId = null;
+    next.approvalUrl = null;
+  }
+
+  if (args.actions.some((action) => action.type === "confirm_checkout")) {
+    next.pendingConfirmation = "checkout";
+  }
+
+  return next;
+}
 
 // Apply strict rate limiting (chat is expensive)
 chatRouter.post("/", strictRateLimit);
@@ -45,6 +110,7 @@ chatRouter.post("/", async (req, res) => {
     // Get or create conversation
     const { sessionId, message, imageUrl } = input;
     const userId = identity.userId || input.userId || sessionId;
+    await ensureUserExists(userId, identity.authUser?.email || null);
     logChatFlow(requestId, "identity_resolved", { userId, sessionId, messageLength: message.length, hasImage: !!imageUrl });
     
     logChatFlow(requestId, "db_history_load_start");
@@ -59,6 +125,7 @@ chatRouter.post("/", async (req, res) => {
     const conversationHistory: AgentMessage[] = conversation?.messages 
       ? (conversation.messages as any[]) 
       : [];
+    const sessionKnowledge = normalizeSessionKnowledge(conversation?.sessionKnowledge);
     
     logChatFlow(requestId, "db_history_load_ok", { conversationFound: !!conversation, messageCount: conversationHistory.length });
 
@@ -80,7 +147,7 @@ chatRouter.post("/", async (req, res) => {
       },
       visibleProductIds: [],
     };
-    
+
     // Run the agent (pass imageUrl for visual search)
     logChatFlow(requestId, "agent_start");
     const result = await runAgent({
@@ -90,16 +157,26 @@ chatRouter.post("/", async (req, res) => {
       imageUrl,
       conversationHistory,
       shoppingState,
+      sessionKnowledge,
     });
     
     // Save conversation to DB using full message history from agent
     logChatFlow(requestId, "agent_complete", { replyLength: result.chatReply?.length || 0, actionCount: result.actions?.length || 0, messageCount: (result.messages || []).length });
     const newHistory = result.messages || [];
+    const nextSessionKnowledge = buildNextSessionKnowledge({
+      previous: sessionKnowledge,
+      message,
+      uiPayload: result.uiPayload,
+      actions: result.actions || [],
+      chatState: String(result.updatedState?.chatState || result.chatState || "chat"),
+    });
+
     
     if (conversation) {
       await db.update(conversations)
         .set({ 
           messages: newHistory as any,
+        sessionKnowledge: nextSessionKnowledge as any,
           lastPreferences: prefs as any,
           updatedAt: new Date(),
         })
@@ -110,6 +187,7 @@ chatRouter.post("/", async (req, res) => {
         sessionId,
         messages: newHistory as any,
         lastPreferences: prefs as any,
+        sessionKnowledge: nextSessionKnowledge as any,
       });
     }
     
@@ -151,7 +229,34 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
     }
 
     const { sessionId, message, imageUrl } = input;
-    const userId = input.userId || sessionId;
+    const identity = await resolveRequestIdentity(req);
+    const userId = identity.userId || input.userId || sessionId;
+
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(and(eq(conversations.userId, userId), eq(conversations.sessionId, sessionId)))
+      .orderBy(desc(conversations.updatedAt))
+      .limit(1);
+
+    const conversationHistory: AgentMessage[] = conversation?.messages ? (conversation.messages as any[]) : [];
+    const sessionKnowledge = normalizeSessionKnowledge(conversation?.sessionKnowledge);
+
+    const [prefs] = await db
+      .select()
+      .from(userPreferences)
+      .where(eq(userPreferences.userId, userId))
+      .limit(1);
+
+    const shoppingState: ShoppingState = {
+      activeFilters: {
+        category: prefs?.preferredStyles?.[0],
+        color: prefs?.preferredColors?.[0],
+        minPrice: undefined,
+        maxPrice: prefs?.maxPrice ? parseFloat(String(prefs.maxPrice)) : undefined,
+      },
+      visibleProductIds: [],
+    };
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -164,6 +269,11 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
       event: "connected",
       data: { sessionId, conversationId: sessionId, hasImage: !!imageUrl, state: "chat" },
     }));
+    logChatFlow(requestId, "stream_agent_call_start", {
+      historyCount: conversationHistory.length,
+      hasSessionKnowledge: !!conversation?.sessionKnowledge,
+      hasPrefs: !!prefs,
+    });
 
     let reply = "";
     let uiPayload: any = { type: "replace_catalog", products: [] };
@@ -175,16 +285,9 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
       userId,
       message,
       imageUrl,
-      conversationHistory: [],
-      shoppingState: {
-        activeFilters: {
-          category: undefined,
-          color: undefined,
-          minPrice: undefined,
-          maxPrice: undefined,
-        },
-        visibleProductIds: [],
-      },
+      conversationHistory,
+      shoppingState,
+      sessionKnowledge,
       onEvent: (event) => {
         if (event.event === "text") {
           reply += event.data;
@@ -199,6 +302,34 @@ chatRouter.post("/stream", strictRateLimit, async (req, res) => {
         res.write(formatSSEMessage(event));
       },
     });
+    logChatFlow(requestId, "stream_agent_call_end", { messageCount: messages.length });
+
+    const nextSessionKnowledge = buildNextSessionKnowledge({
+      previous: sessionKnowledge,
+      message,
+      uiPayload,
+      actions,
+      chatState,
+    });
+
+    if (conversation) {
+      await db.update(conversations)
+        .set({
+          messages: messages as any,
+          lastPreferences: prefs as any,
+          sessionKnowledge: nextSessionKnowledge as any,
+          updatedAt: new Date(),
+        })
+        .where(eq(conversations.id, conversation.id));
+    } else {
+      await db.insert(conversations).values({
+        userId,
+        sessionId,
+        messages: messages as any,
+        lastPreferences: prefs as any,
+        sessionKnowledge: nextSessionKnowledge as any,
+      });
+    }
 
     logChatFlow(requestId, "stream_agent_complete", {
       replyLength: reply.length,
@@ -245,6 +376,7 @@ chatRouter.get("/history", async (req, res) => {
       .select()
       .from(conversations)
       .where(eq(conversations.userId, userId))
+      .orderBy(desc(conversations.updatedAt))
       .limit(1);
     
     if (!conversation) {
@@ -255,6 +387,7 @@ chatRouter.get("/history", async (req, res) => {
     res.json({
       messages: conversation.messages,
       preferences: conversation.lastPreferences,
+      sessionKnowledge: conversation.sessionKnowledge || null,
     });
   } catch (error) {
     console.error("Chat history error:", error);
@@ -358,6 +491,12 @@ chatRouter.delete("/sessions/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to delete chat session" });
   }
 });
+
+
+
+
+
+
 
 
 

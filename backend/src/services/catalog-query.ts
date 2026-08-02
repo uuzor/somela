@@ -6,6 +6,7 @@
  */
 
 import { db, products, productVariants } from "../db/index.js";
+import { productSummarySelect } from "../db/product-select.js";
 import { eq, and, like, or, gte, lte, inArray, sql } from "drizzle-orm";
 
 export interface CatalogFilters {
@@ -66,7 +67,7 @@ export async function searchCatalog(filters: CatalogFilters): Promise<any[]> {
   }
   
   let results = await db
-    .select()
+    .select(productSummarySelect)
     .from(products)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .limit(limit)
@@ -84,14 +85,14 @@ export async function searchByIds(productIds: string[]): Promise<any[]> {
   if (productIds.length === 0) return [];
   
   return db
-    .select()
+    .select(productSummarySelect)
     .from(products)
     .where(inArray(products.id, productIds));
 }
 
 export async function getProductById(productId: string): Promise<any | null> {
   const [product] = await db
-    .select()
+    .select(productSummarySelect)
     .from(products)
     .where(eq(products.id, productId))
     .limit(1);
@@ -120,3 +121,4 @@ export async function getCategories(): Promise<string[]> {
 export async function getColors(): Promise<string[]> {
   return COLOR_WORDS;
 }
+

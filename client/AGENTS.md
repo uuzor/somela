@@ -17,3 +17,16 @@ Start with `README.md` for local setup, environment variables, and publish workf
 - Use `npm run dev` for local development.
 - Use `npm run build` for production builds.
 - Run the relevant checks from `package.json` before finishing code changes.
+
+Shopping Agents
+
+These help customers buy.
+
+Examples
+
+Shopify Sidekick
+Rep AI
+Concie
+Gobot
+Zipchat
+Clearly

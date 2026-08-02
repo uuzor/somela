@@ -1,8 +1,56 @@
-﻿import { z } from "zod";
+import { z } from "zod";
 
 const optionalUrlSchema = z.preprocess((value) => {
   return value === null ? undefined : value;
 }, z.string().url().optional());
+
+
+const ProductVariantSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  price: z.number(),
+  compareAtPrice: z.number().nullable().optional(),
+  available: z.boolean(),
+  availableForSale: z.boolean().optional(),
+  stockQuantity: z.number().nullable().optional(),
+  color: z.string().optional(),
+  size: z.string().optional(),
+  barcode: z.string().nullable().optional(),
+  requiresShipping: z.boolean().nullable().optional(),
+  taxable: z.boolean().nullable().optional(),
+  weight: z.number().nullable().optional(),
+  weightUnit: z.string().nullable().optional(),
+  image: z.string().nullable().optional(),
+});
+
+const ProductCardSchema = z.object({
+  id: z.string(),
+  shopId: z.string(),
+  handle: z.string().optional(),
+  title: z.string(),
+  description: z.string().nullable().optional(),
+  category: z.string().nullable().optional(),
+  vendor: z.string().nullable().optional(),
+  productType: z.string().nullable().optional(),
+  status: z.string().nullable().optional(),
+  images: z.array(z.string()),
+  primaryImage: z.string().nullable().optional(),
+  processedImages: z.array(z.string()).optional().default([]),
+  variants: z.array(ProductVariantSchema).optional().default([]),
+  options: z.array(z.object({ name: z.string(), values: z.array(z.string()) })).optional().default([]),
+  collections: z.array(z.string()).optional().default([]),
+  seo: z.object({ title: z.string().nullable().optional(), description: z.string().nullable().optional() }).nullable().optional(),
+  minPrice: z.number().nullable(),
+  maxPrice: z.number().nullable(),
+  compareAtPriceMin: z.number().nullable().optional(),
+  compareAtPriceMax: z.number().nullable().optional(),
+  onSale: z.boolean().optional(),
+  totalInventory: z.number().nullable().optional(),
+  requiresShipping: z.boolean().nullable().optional(),
+  taxable: z.boolean().nullable().optional(),
+  tags: z.array(z.string()).optional().default([]),
+  url: z.string().nullable().optional(),
+});
 
 // ============================================================================
 // Catalog API
@@ -54,14 +102,19 @@ export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
 export const ChatResponseSchema = z.object({
   reply: z.string(),
-  products: z.array(z.object({
-    id: z.string(),
-    title: z.string(),
-    images: z.array(z.string()),
-    minPrice: z.number().nullable(),
-    maxPrice: z.number().nullable(),
-    category: z.string().nullable(),
-    url: z.string().nullable(),
+  products: z.array(ProductCardSchema.pick({
+    id: true,
+    shopId: true,
+    handle: true,
+    title: true,
+    images: true,
+    primaryImage: true,
+    minPrice: true,
+    maxPrice: true,
+    category: true,
+    url: true,
+    vendor: true,
+    status: true,
   })),
   preferences: z.object({
     category: z.string().optional(),
@@ -102,14 +155,19 @@ export const VisualSearchRequestSchema = z.object({
 export const VisualSearchResponseSchema = z.object({
   taskId: z.string().uuid(),
   status: z.enum(["pending", "processing", "completed", "failed"]),
-  results: z.array(z.object({
-    productId: z.string(),
-    title: z.string(),
-    images: z.array(z.string()),
-    distance: z.number(),
-    confidence: z.enum(["exact", "close", "similar", "low"]),
-    minPrice: z.number().nullable(),
-    url: z.string().nullable(),
+  results: z.array(ProductCardSchema.pick({
+    id: true,
+    shopId: true,
+    handle: true,
+    title: true,
+    images: true,
+    primaryImage: true,
+    minPrice: true,
+    maxPrice: true,
+    category: true,
+    url: true,
+    vendor: true,
+    status: true,
   })).optional(),
 });
 
@@ -147,4 +205,89 @@ export const UpdateCartItemSchema = z.object({
 
 export type AddCartItem = z.infer<typeof AddCartItemSchema>;
 export type UpdateCartItem = z.infer<typeof UpdateCartItemSchema>;
+
+
+// ============================================================================
+// Prava Payments API
+// ============================================================================
+
+export const PravaConnectionSchema = z.object({
+  id: z.string(),
+  userId: z.string().nullable().optional(),
+  sessionId: z.string().nullable().optional(),
+  provider: z.string(),
+  providerAccountId: z.string().nullable().optional(),
+  providerSubject: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+  displayName: z.string().nullable().optional(),
+  status: z.string(),
+  metadata: z.record(z.any()).optional().default({}),
+  linkedAt: z.coerce.date(),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
+export const PravaPaymentSessionSchema = z.object({
+  id: z.string(),
+  userId: z.string().nullable().optional(),
+  sessionId: z.string().nullable().optional(),
+  cartId: z.string().nullable().optional(),
+  merchantName: z.string(),
+  merchantUrl: z.string().url(),
+  merchantCountry: z.string(),
+  totalAmount: z.number(),
+  currency: z.string(),
+  status: z.string(),
+  approvalUrl: z.string().url().nullable().optional(),
+  providerSessionId: z.string().nullable().optional(),
+  providerCheckoutId: z.string().nullable().optional(),
+  expiresAt: z.coerce.date().nullable().optional(),
+  metadata: z.record(z.any()).optional().default({}),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
+export const PravaMandateSchema = z.object({
+  id: z.string(),
+  userId: z.string().nullable().optional(),
+  sessionId: z.string().nullable().optional(),
+  scope: z.enum(["listed", "any"]),
+  frequency: z.enum(["one_time", "weekly", "monthly", "yearly"]),
+  merchantName: z.string().nullable().optional(),
+  merchantUrl: z.string().url().nullable().optional(),
+  merchantCountry: z.string().nullable().optional(),
+  amount: z.number(),
+  currency: z.string(),
+  status: z.string(),
+  approvalUrl: z.string().url().nullable().optional(),
+  providerMandateId: z.string().nullable().optional(),
+  validFrom: z.coerce.date(),
+  validUntil: z.coerce.date().nullable().optional(),
+  metadata: z.record(z.any()).optional().default({}),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
+export const PravaTransactionSchema = z.object({
+  id: z.string(),
+  userId: z.string().nullable().optional(),
+  sessionId: z.string().nullable().optional(),
+  paymentSessionId: z.string().nullable().optional(),
+  mandateId: z.string().nullable().optional(),
+  merchantName: z.string(),
+  merchantUrl: z.string().url(),
+  merchantCountry: z.string(),
+  amount: z.number(),
+  currency: z.string(),
+  status: z.string(),
+  providerTransactionId: z.string().nullable().optional(),
+  approvalStatus: z.string().nullable().optional(),
+  authorizationCode: z.string().nullable().optional(),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+  metadata: z.record(z.any()).optional().default({}),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
 

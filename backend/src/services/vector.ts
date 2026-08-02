@@ -12,6 +12,7 @@
 
 import postgres from "postgres";
 import { db, products, productEmbeddings } from "../db/index.js";
+import { productSummarySelect } from "../db/product-select.js";
 import { eq, sql, isNull } from "drizzle-orm";
 
 // ============================================================================

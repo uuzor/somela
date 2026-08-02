@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Validation Schemas for AI-Generated Data
  * 
  * Since AI can return inconsistent data, all responses must be validated
@@ -47,6 +47,28 @@ export interface ShoppingState {
   purchaseIntentId?: string;
 }
 
+export interface SessionKnowledge {
+  lastMessage?: string;
+  lastChatState?: ChatState;
+  lastAssistantIntent?: string;
+  pendingConfirmation?: "checkout" | "try_on" | "cart" | "none";
+  purchaseIntentId?: string | null;
+  paymentSessionId?: string | null;
+  approvalUrl?: string | null;
+  cartSummary?: {
+    cartId?: string | null;
+    itemCount?: number;
+    totalPrice?: number;
+    currency?: string;
+    updatedAt?: string;
+  } | null;
+  savedSummary?: {
+    itemCount?: number;
+    updatedAt?: string;
+  } | null;
+  lastProductIds?: string[];
+}
+
 export const ChatStateSchema = z.enum([
   "chat",
   "clarify",
@@ -91,6 +113,10 @@ export const PurchaseSummarySchema = z.object({
   taxes: z.number().min(0),
   total: z.number().min(0),
   currency: z.string().length(3), // ISO currency code
+  purchaseIntentId: z.string().optional(),
+  paymentSessionId: z.string().optional(),
+  providerSessionId: z.string().optional(),
+  approvalUrl: z.string().url().nullable().optional(),
 });
 
 export type PurchaseSummary = z.infer<typeof PurchaseSummarySchema>;
@@ -141,6 +167,8 @@ export const UIPayloadConfirmPurchaseSchema = z.object({
 export const UIPayloadPaymentPendingSchema = z.object({
   type: z.literal("payment_pending"),
   purchaseIntentId: z.string().min(1),
+  approvalUrl: z.string().url().nullable().optional(),
+  providerSessionId: z.string().optional(),
 });
 
 export const UIPayloadOrderConfirmedSchema = z.object({
@@ -272,6 +300,9 @@ export const SuggestTryOnResultSchema = z.object({
 
 export const PreparePurchaseResultSchema = z.object({
   purchaseIntentId: z.string().optional(),
+  paymentSessionId: z.string().optional(),
+  providerSessionId: z.string().optional(),
+  approvalUrl: z.string().url().nullable().optional(),
   productId: z.string().optional(),
   productName: z.string().optional(),
   variant: z.string().optional(),
@@ -448,4 +479,5 @@ export type SSEMessage = {
 export function formatSSEMessage(event: StreamingEvent): string {
   return `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`;
 }
+
 

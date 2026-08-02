@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Shopping Agent Service
  * 
  * Implements an OpenAI-compatible agent loop with tools for:
@@ -16,7 +16,10 @@
  */
 
 import OpenAI from "openai";
-import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies, carts, cartItems } from "../db/index.js";
+import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies, carts, cartItems, pravaPaymentSessions, pravaTransactions, shops } from "../db/index.js";
+import { createPravaPaymentSession, createPravaTransaction, updatePravaTransaction, getPravaRemotePaymentResult } from "../services/prava.js";
+import { hasSavedProductsOwner, listSavedProducts } from "../services/saved-products.js";
+import { productSummarySelect } from "../db/product-select.js";
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { searchCatalog } from "./catalog-query.js";
 import { vectorSearchProducts } from "./vector.js";
@@ -33,10 +36,11 @@ import {
   type StreamingEvent,
   type ChatMessage,
   type ChatState,
+  type SessionKnowledge,
 } from "./validation.js";
 
 // Re-export validated types
-export type { ProductCard, UIPayload, UIAction, StreamingEvent, ChatMessage, ChatState } from "./validation.js";
+export type { ProductCard, UIPayload, UIAction, StreamingEvent, ChatMessage, ChatState, SessionKnowledge } from "./validation.js";
 export type ShoppingState = ValidatedShoppingState;
 export type CatalogFilters = ValidatedCatalogFilters;
 export type AgentResponse = ValidatedAgentResponse;
@@ -86,6 +90,21 @@ interface Tool {
 // Streaming callback type
 export type StreamingCallback = (event: StreamingEvent) => void;
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
 // ============================================================================
 // Default/Empty Validators
 // ============================================================================
@@ -131,7 +150,7 @@ function deriveChatState(
   }
 
   if (uiPayload.type === "confirm_purchase" || uiPayload.type === "payment_pending" || toolNames.has("prepare_purchase") || toolNames.has("execute_prava_checkout")) {
-    return toolNames.has("execute_prava_checkout") ? "processing" : "checkout";
+    return "checkout";
   }
 
   if (uiPayload.type === "order_confirmed") {
@@ -150,9 +169,44 @@ function deriveChatState(
   return "chat";
 }
 
-// ============================================================================
+function isBareConfirmation(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  return /^(confirm|confirmed|yes|yep|yeah|ok|okay|proceed|go ahead|do it|sounds good|let's do it|lets do it)$/.test(normalized);
+}
+
+function isCartCheckoutIntent(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  return /(checkout|check out|buy these|buy those|checkout my cart|check out my cart|checkout the cart|pay for the cart|continue to checkout|proceed to checkout|start checkout)/.test(normalized);
+}
+
+function buildSessionKnowledgeContext(sessionKnowledge?: SessionKnowledge | null): string {
+  if (!sessionKnowledge) {
+    return "";
+  }
+
+  const lines = [
+    "SESSION KNOWLEDGE:",
+    sessionKnowledge.lastMessage ? `- Last message: ${sessionKnowledge.lastMessage}` : null,
+    sessionKnowledge.lastChatState ? `- Last chat state: ${sessionKnowledge.lastChatState}` : null,
+    sessionKnowledge.lastAssistantIntent ? `- Last assistant intent: ${sessionKnowledge.lastAssistantIntent}` : null,
+    sessionKnowledge.pendingConfirmation ? `- Pending confirmation: ${sessionKnowledge.pendingConfirmation}` : null,
+    sessionKnowledge.purchaseIntentId ? `- Purchase intent ID: ${sessionKnowledge.purchaseIntentId}` : null,
+    sessionKnowledge.paymentSessionId ? `- Payment session ID: ${sessionKnowledge.paymentSessionId}` : null,
+    sessionKnowledge.approvalUrl ? `- Approval URL: ${sessionKnowledge.approvalUrl}` : null,
+    sessionKnowledge.cartSummary ? `- Cart summary: ${sessionKnowledge.cartSummary.itemCount ?? 0} items, total ${sessionKnowledge.cartSummary.currency || "USD"} ${sessionKnowledge.cartSummary.totalPrice ?? 0}` : null,
+    sessionKnowledge.savedSummary ? `- Saved summary: ${sessionKnowledge.savedSummary.itemCount ?? 0} items` : null,
+    sessionKnowledge.lastProductIds?.length ? `- Last product IDs: ${sessionKnowledge.lastProductIds.join(", ")}` : null,
+    "",
+    "If the user sends a bare confirmation like 'confirm', 'yes', or 'proceed', resolve it against the pending confirmation in session knowledge.",
+    "Do not ask for a user ID, session ID, or the specific item again if the session knowledge already identifies the active checkout or try-on flow.",
+  ].filter(Boolean);
+
+  return lines.join("\n");
+}
+
+// ==========================================================================
 // Agent Tools
-// ============================================================================
+// ==========================================================================
 
 /**
  * Search the product catalog using hybrid search (vector + structured filters)
@@ -176,7 +230,7 @@ async function searchCatalogTool(args: { query?: string; category?: string; colo
     if (vectorResults.length > 0) {
       // Get full product data
       const productIds = vectorResults.map(r => r.productId);
-      const productData = await db.select().from(products).where(inArray(products.id, productIds));
+      const productData = await db.select(productSummarySelect).from(products).where(inArray(products.id, productIds));
       results = productData.map(p => ({
         productId: p.id,
         title: p.title,
@@ -211,7 +265,7 @@ async function searchCatalogTool(args: { query?: string; category?: string; colo
  * Get detailed information about a specific product
  */
 async function getProductDetailsTool(args: { productId: string }) {
-  const [product] = await db.select().from(products).where(eq(products.id, args.productId)).limit(1);
+  const [product] = await db.select(productSummarySelect).from(products).where(eq(products.id, args.productId)).limit(1);
   
   if (!product) {
     return { error: "Product not found" };
@@ -246,9 +300,7 @@ async function getAvailableVariantsTool(args: { productId: string }) {
     })),
   };
 }
-
 /**
- * Get user's saved preferences
  */
 async function getUserPreferencesTool(args: { userId: string }) {
   const [prefs] = await db.select().from(userPreferences).where(eq(userPreferences.userId, args.userId)).limit(1);
@@ -309,7 +361,7 @@ async function setUserPreferencesTool(args: { userId: string; category?: string;
  * Suggest try-on (returns UI action card, does NOT initiate)
  */
 async function suggestTryOnTool(args: { productId: string; reason: string }) {
-  const [product] = await db.select().from(products).where(eq(products.id, args.productId)).limit(1);
+  const [product] = await db.select(productSummarySelect).from(products).where(eq(products.id, args.productId)).limit(1);
   
   if (!product) {
     return { error: "Product not found" };
@@ -344,7 +396,7 @@ async function initiateTryOnTool(args: { productId: string; variantId?: string; 
   }
 
   // Get product image
-  const [product] = await db.select().from(products).where(eq(products.id, args.productId)).limit(1);
+  const [product] = await db.select(productSummarySelect).from(products).where(eq(products.id, args.productId)).limit(1);
   
   if (!product || !product.images?.[0]) {
     return { error: "Product image not available" };
@@ -387,36 +439,312 @@ async function getTryOnStatusTool(args: { tryOnId: string }) {
 /**
  * Prepare purchase (stores immutable purchase intent)
  */
-async function preparePurchaseTool(args: { productId: string; variantId?: string; quantity?: number; userId: string }) {
-  const [product] = await db.select().from(products).where(eq(products.id, args.productId)).limit(1);
-  
+async function preparePurchaseTool(args: { productId?: string; cartCheckout?: boolean; cartItemIds?: string[]; variantId?: string; quantity?: number; userId: string; sessionId?: string }) {
+  const prepareFromCart = Boolean(args.cartCheckout || !args.productId);
+  console.log(`[CHAT_FLOW ${args.sessionId || "no-session"}] prepare_purchase_start`, {
+    userId: args.userId,
+    sessionId: args.sessionId || null,
+    cartCheckout: Boolean(args.cartCheckout || !args.productId),
+    productId: args.productId || null,
+    cartItemIdsCount: Array.isArray(args.cartItemIds) ? args.cartItemIds.length : 0,
+    quantity: args.quantity || 1,
+  });
+
+
+  const buildGroupCheckout = async (items: Array<{ product: any; cartItemId?: string; quantity: number; variantId?: string | null }>) => {
+    const grouped = new Map<string, Array<typeof items[number]>>();
+    for (const item of items) {
+      const merchantKey = item.product?.merchantName || item.product?.shopName || item.product?.shop || "Partner Store";
+      const next = grouped.get(merchantKey) || [];
+      next.push(item);
+      grouped.set(merchantKey, next);
+    }
+
+    const merchantGroups = Array.from(grouped.entries()).map(([merchantName, groupItems]) => {
+      const merchant = groupItems[0]?.product || {};
+      const checkoutItems = groupItems.map((item) => {
+        const product = item.product || {};
+        const variant = item.variantId
+          ? (product.variants || []).find((v: any) => v.id === item.variantId) || null
+          : null;
+        const itemPrice = variant?.price
+          ? parseFloat(String(variant.price))
+          : (product.minPrice ? parseFloat(String(product.minPrice)) : 0);
+        return {
+          description: product.title || "Item",
+          unitPrice: String(itemPrice),
+          quantity: item.quantity,
+          productId: product.id,
+          cartItemId: item.cartItemId || null,
+          variantId: item.variantId || null,
+        };
+      });
+
+      const total = Math.round(checkoutItems.reduce((sum, item) => sum + Number(item.unitPrice || 0) * Number(item.quantity || 1), 0) * 100) / 100;
+      return {
+        merchantName,
+        merchantUrl: merchant.merchantUrl || merchant.url || "https://example.com",
+        merchantCountry: "US",
+        currency: "USD",
+        totalAmount: total,
+        items: checkoutItems,
+      };
+    });
+
+    return merchantGroups;
+  };
+
+  if (prepareFromCart) {
+    const cart = await resolveCart(args.userId, args.sessionId);
+    if (!cart) {
+      return { error: "Unable to resolve cart. Please provide userId or sessionId." };
+    }
+
+    const rows = await db
+      .select({
+        cartItemId: cartItems.id,
+        productId: cartItems.productId,
+        quantity: cartItems.quantity,
+        variantId: cartItems.variantId,
+        product: productSummarySelect,
+        merchantName: shops.name,
+        merchantDomain: shops.domain,
+        merchantUrl: shops.baseUrl,
+      })
+      .from(cartItems)
+      .innerJoin(products, eq(cartItems.productId, products.id))
+      .innerJoin(shops, eq(products.shop, shops.shopId))
+      .where(eq(cartItems.cartId, cart.id));
+
+    const cartItemIds = Array.isArray(args.cartItemIds) && args.cartItemIds.length > 0
+      ? new Set(args.cartItemIds)
+      : null;
+    const selected = cartItemIds
+      ? rows.filter((row) => cartItemIds.has(row.cartItemId))
+      : rows;
+
+    console.log(`[CHAT_FLOW ${args.sessionId || "no-session"}] prepare_purchase_cart_rows`, {
+      cartId: cart.id,
+      totalRows: rows.length,
+      selectedRows: selected.length,
+    });
+    if (selected.length === 0) {
+      return { error: "No cart items found for checkout" };
+    }
+
+    const merchantGroups = await buildGroupCheckout(selected.map((row) => ({
+      ...row,
+      product: {
+        ...row.product,
+        merchantName: row.merchantName,
+        merchantDomain: row.merchantDomain,
+      },
+    })));
+    console.log(`[CHAT_FLOW ${args.sessionId || "no-session"}] prepare_purchase_grouped`, {
+      merchantGroups: merchantGroups.map((group) => ({ merchantName: group.merchantName, itemCount: group.items.length, totalAmount: group.totalAmount })),
+      total: merchantGroups.reduce((sum, group) => sum + Number(group.totalAmount || 0), 0),
+    });
+
+    if (merchantGroups.length > 1) {
+      return {
+        cartCheckout: true,
+        multiMerchant: true,
+        merchantGroups,
+        total: merchantGroups.reduce((sum, group) => sum + Number(group.totalAmount || 0), 0),
+        currency: "USD",
+        message: `Your cart contains ${selected.length} items across ${merchantGroups.length} merchants. Prava checkout must be created merchant by merchant, so I can prepare each merchant group in sequence.`,
+      };
+    }
+
+    const group = merchantGroups[0];
+    console.log(`[CHAT_FLOW ${args.sessionId || "no-session"}] prepare_purchase_create_session`, {
+      merchantName: group.merchantName,
+      itemCount: group.items.length,
+      totalAmount: group.totalAmount,
+      currency: group.currency,
+    });
+
+    const paymentSession = await createPravaPaymentSession(
+      { userId: args.userId },
+      {
+        merchantName: group.merchantName,
+        merchantUrl: group.merchantUrl,
+        merchantCountry: group.merchantCountry,
+        totalAmount: group.totalAmount,
+        currency: group.currency,
+        status: "awaiting_confirmation",
+        metadata: {
+          items: group.items,
+          cartCheckout: true,
+          merchantGroupCount: merchantGroups.length,
+        },
+      },
+    );
+
+    if (!paymentSession) {
+      return { error: "Failed to create payment session" };
+    }
+
+    return {
+      cartCheckout: true,
+      purchaseIntentId: paymentSession.id,
+      paymentSessionId: paymentSession.id,
+      providerSessionId: paymentSession.providerSessionId || null,
+      approvalUrl: paymentSession.approvalUrl || null,
+      merchant: group.merchantName,
+      merchantUrl: group.merchantUrl,
+      itemPrice: 0,
+      shipping: 0,
+      taxes: 0,
+      total: group.totalAmount,
+      currency: group.currency,
+      items: group.items,
+      requiresConfirmation: true,
+      message: `Cart checkout prepared for ${group.merchantName} with ${group.items.length} items. Confirm to proceed with Prava checkout.`,
+    };
+  }
+
+  console.log(`[CHAT_FLOW ${args.sessionId || "no-session"}] prepare_purchase_single_product_start`, {
+    productId: args.productId,
+    variantId: args.variantId || null,
+  });
+
+  const [product] = await db.select(productSummarySelect).from(products).where(eq(products.id, args.productId!)).limit(1);
   if (!product) {
     return { error: "Product not found" };
+  }
+
+  const cart = await resolveCart(args.userId, args.sessionId);
+  if (cart) {
+    const rows = await db
+      .select({
+        cartItemId: cartItems.id,
+        productId: cartItems.productId,
+        quantity: cartItems.quantity,
+        variantId: cartItems.variantId,
+        product: productSummarySelect,
+        merchantName: shops.name,
+        merchantDomain: shops.domain,
+        merchantUrl: shops.baseUrl,
+      })
+      .from(cartItems)
+      .innerJoin(products, eq(cartItems.productId, products.id))
+      .innerJoin(shops, eq(products.shop, shops.shopId))
+      .where(eq(cartItems.cartId, cart.id));
+
+    const merchantRows = rows.filter((row) => row.product?.shop === product.shop);
+    if (merchantRows.length > 1) {
+      const merchantGroups = await buildGroupCheckout(merchantRows.map((row) => ({
+        ...row,
+        product: {
+          ...row.product,
+          merchantName: row.merchantName,
+          merchantDomain: row.merchantDomain,
+          merchantUrl: row.merchantUrl,
+        },
+      })));
+      const group = merchantGroups[0];
+      const paymentSession = await createPravaPaymentSession(
+        { userId: args.userId },
+        {
+          merchantName: group.merchantName,
+          merchantUrl: group.merchantUrl,
+          merchantCountry: group.merchantCountry,
+          totalAmount: group.totalAmount,
+          currency: group.currency,
+          status: "awaiting_confirmation",
+          metadata: {
+            items: group.items,
+            cartCheckout: true,
+            merchantGroupCount: merchantGroups.length,
+            merchantCheckoutSource: "product_in_cart",
+          },
+        },
+      );
+
+      if (!paymentSession) {
+        return { error: "Failed to create payment session" };
+      }
+
+      return {
+        cartCheckout: true,
+        purchaseIntentId: paymentSession.id,
+        paymentSessionId: paymentSession.id,
+        providerSessionId: paymentSession.providerSessionId || null,
+        approvalUrl: paymentSession.approvalUrl || null,
+        merchant: group.merchantName,
+        merchantUrl: group.merchantUrl,
+        itemPrice: 0,
+        shipping: 0,
+        taxes: 0,
+        total: group.totalAmount,
+        currency: group.currency,
+        items: group.items,
+        requiresConfirmation: true,
+        message: `Cart checkout prepared for ${group.merchantName} with ${group.items.length} items. Confirm to proceed with Prava checkout.`,
+      };
+    }
   }
 
   let variant = null;
   if (args.variantId) {
     const [v] = await db.select().from(productVariants).where(
-      and(eq(productVariants.id, args.variantId), eq(productVariants.productId, args.productId))
+      and(eq(productVariants.id, args.variantId), eq(productVariants.productId, args.productId!))
     ).limit(1);
     variant = v;
   }
 
-  const itemPrice = variant?.price 
-    ? parseFloat(String(variant.price)) 
+  const quantity = Math.max(1, Number(args.quantity || 1));
+  const itemPrice = variant?.price
+    ? parseFloat(String(variant.price))
     : (product.minPrice ? parseFloat(String(product.minPrice)) : 0);
-  const shipping = 8.95; // Placeholder
-  const taxes = Math.round(itemPrice * 0.08 * 100) / 100; // 8% placeholder
-  const total = Math.round((itemPrice + shipping + taxes) * 100) / 100;
+  const shipping = 8.95;
+  const taxes = Math.round(itemPrice * 0.08 * 100) / 100;
+  const total = Math.round((itemPrice * quantity + shipping + taxes) * 100) / 100;
+  console.log(`[CHAT_FLOW ${args.sessionId || "no-session"}] prepare_purchase_single_product_totals`, {
+    productId: product.id,
+    quantity,
+    itemPrice,
+    shipping,
+    taxes,
+    total,
+  });
 
-  // Store purchase intent (in production, use proper table with immutable records)
-  const purchaseIntentId = `pi_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  const paymentSession = await createPravaPaymentSession(
+    { userId: args.userId },
+    {
+      merchantName: product.shop || "Partner Store",
+      merchantUrl: product.url || "https://example.com",
+      merchantCountry: "US",
+      totalAmount: total,
+      currency: "USD",
+      status: "awaiting_confirmation",
+      metadata: {
+        items: [{ description: product.title, unitPrice: String(itemPrice), quantity }],
+        productId: product.id,
+        productName: product.title,
+        variantId: args.variantId || null,
+        quantity,
+        itemPrice,
+        shipping,
+        taxes,
+      },
+    },
+  );
+
+  if (!paymentSession) {
+    return { error: "Failed to create payment session" };
+  }
 
   return {
-    purchaseIntentId,
+    purchaseIntentId: paymentSession.id,
+    paymentSessionId: paymentSession.id,
+    providerSessionId: paymentSession.providerSessionId || null,
+    approvalUrl: paymentSession.approvalUrl || null,
     productId: product.id,
     productName: product.title,
-    variant: variant ? `${variant.color || ''} ${variant.size || ''}`.trim() : "Standard",
+    variant: variant ? `${variant.color || ""} ${variant.size || ""}`.trim() : "Standard",
     merchant: product.shop || "Partner Store",
     itemPrice,
     shipping,
@@ -436,18 +764,31 @@ async function executePravaCheckoutTool(args: { purchaseIntentId: string; confir
     return { error: "Confirmation required", requiresConfirmation: true };
   }
 
-  // In production, this would:
-  // 1. Verify confirmation token
-  // 2. Call Prava API for payment token
-  // 3. Execute checkout on merchant site
-  // 4. Return actual order status
+  const [session] = await db.select().from(pravaPaymentSessions).where(eq(pravaPaymentSessions.id, args.purchaseIntentId)).limit(1);
+  if (!session) {
+    return { error: "Purchase intent not found" };
+  }
 
-  // Placeholder implementation
-  const orderId = `ord_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const [transaction] = await db.insert(pravaTransactions).values({
+    userId: args.userId,
+    paymentSessionId: session.id,
+    merchantName: session.merchantName,
+    merchantUrl: session.merchantUrl,
+    merchantCountry: session.merchantCountry,
+    amount: session.totalAmount,
+    currency: session.currency || "USD",
+    status: "pending_approval",
+    approvalStatus: "pending",
+    metadata: {
+      purchaseIntentId: session.id,
+      confirmationToken: args.confirmationToken,
+    },
+  }).returning();
 
   return {
     success: true,
-    orderId,
+    orderId: transaction.id,
+    purchaseIntentId: session.id,
     status: "pending_approval",
     message: "Checkout initiated. Awaiting Prava approval...",
     approvalRequired: true,
@@ -458,13 +799,54 @@ async function executePravaCheckoutTool(args: { purchaseIntentId: string; confir
   * Get purchase status
   */
 async function getPurchaseStatusTool(args: { purchaseIntentId: string }) {
-  // In production, query actual order/payment status
-  // For now, return placeholder
-  
+  const [session] = await db.select().from(pravaPaymentSessions).where(eq(pravaPaymentSessions.id, args.purchaseIntentId)).limit(1);
+  if (!session) {
+    return { purchaseIntentId: args.purchaseIntentId, status: "not_found", message: "Purchase intent not found." };
+  }
+
+  const [transaction] = await db.select().from(pravaTransactions).where(eq(pravaTransactions.paymentSessionId, session.id)).limit(1);
+  const remoteSessionId = session.providerSessionId || session.id;
+  let remote: any = null;
+
+  try {
+    remote = await getPravaRemotePaymentResult(remoteSessionId);
+  } catch {
+    remote = null;
+  }
+
+  const remoteStatus = remote?.status || session.status || transaction?.status || "pending";
+
+  if (remoteStatus === "completed" && transaction) {
+    await updatePravaTransaction({ userId: session.userId, sessionId: session.sessionId }, transaction.id, {
+      status: "captured",
+      approvalStatus: "approved",
+      metadata: {
+        ...(transaction.metadata || {}),
+        remoteResult: remote,
+      },
+    });
+  } else if (remoteStatus === "failed" && transaction) {
+    await updatePravaTransaction({ userId: session.userId, sessionId: session.sessionId }, transaction.id, {
+      status: "declined",
+      approvalStatus: "declined",
+      errorMessage: remote?.transactions?.[0]?.line_items?.[0]?.status || "Payment failed",
+      metadata: {
+        ...(transaction.metadata || {}),
+        remoteResult: remote,
+      },
+    });
+  }
+
   return {
     purchaseIntentId: args.purchaseIntentId,
-    status: "pending",
-    message: "Payment status pending. Please check back shortly.",
+    status: remoteStatus,
+    message: remoteStatus === "completed"
+      ? "Payment completed successfully."
+      : remoteStatus === "failed"
+        ? "Payment was declined."
+        : "Payment status pending. Please check back shortly.",
+    providerSessionId: session.providerSessionId || null,
+    approvalUrl: session.approvalUrl || null,
   };
 }
 
@@ -504,7 +886,7 @@ async function addToCartTool(args: { productId: string; variantId?: string; quan
     return { error: "Unable to resolve cart. Please provide userId or sessionId." };
   }
 
-  const [product] = await db.select().from(products).where(eq(products.id, args.productId)).limit(1);
+  const [product] = await db.select(productSummarySelect).from(products).where(eq(products.id, args.productId)).limit(1);
   if (!product) {
     return { error: "Product not found" };
   }
@@ -547,13 +929,31 @@ async function viewCartTool(args: { userId?: string; sessionId?: string }) {
 
   const cartItemsWithProducts = await Promise.all(
     items.map(async (item) => {
-      const [product] = await db.select().from(products).where(eq(products.id, item.productId)).limit(1);
+      const [product] = await db
+        .select({
+          ...productSummarySelect,
+          merchantName: shops.name,
+          merchantDomain: shops.domain,
+          merchantUrl: shops.baseUrl,
+        })
+        .from(products)
+        .innerJoin(shops, eq(products.shop, shops.shopId))
+        .where(eq(products.id, item.productId))
+        .limit(1);
       return {
         cartItemId: item.id,
         productId: item.productId,
-        title: product?.title || "Unknown Product",
+        title: product?.title || 'Unknown Product',
         images: product?.images || [],
         minPrice: product?.minPrice ? parseFloat(String(product.minPrice)) : null,
+        maxPrice: product?.maxPrice ? parseFloat(String(product.maxPrice)) : null,
+        category: product?.category || null,
+        url: product?.url || null,
+        merchantName: product?.merchantName || null,
+        merchantDomain: product?.merchantDomain || null,
+        merchantUrl: product?.merchantUrl || null,
+        shopId: product?.shopId || null,
+        shop: product?.shop || null,
         variantId: item.variantId,
         quantity: item.quantity,
       };
@@ -566,7 +966,45 @@ async function viewCartTool(args: { userId?: string; sessionId?: string }) {
     return sum + price * i.quantity;
   }, 0);
 
-  return { items: cartItemsWithProducts, totalItems, totalPrice: Math.round(totalPrice * 100) / 100 };
+  const grouped = cartItemsWithProducts.reduce((acc: Record<string, any[]>, item) => {
+    const key = item.merchantName || item.shop || "Partner Store";
+    acc[key] = acc[key] || [];
+    acc[key].push(item);
+    return acc;
+  }, {});
+
+  const merchantGroups = Object.entries(grouped).map(([merchantName, groupItems]) => ({
+    merchantName,
+    totalItems: groupItems.reduce((sum, item: any) => sum + Number(item.quantity || 1), 0),
+    totalPrice: Math.round(groupItems.reduce((sum, item: any) => sum + Number(item.minPrice || 0) * Number(item.quantity || 1), 0) * 100) / 100,
+    items: groupItems,
+  }));
+
+  return { items: cartItemsWithProducts, merchantGroups, totalItems, totalPrice: Math.round(totalPrice * 100) / 100 };
+}
+
+/**
+ * View the current saved products
+ */
+async function viewSavedProductsTool(args: { userId?: string; sessionId?: string }) {
+  const owner = { userId: args.userId || null, sessionId: args.sessionId || null };
+  if (!hasSavedProductsOwner(owner)) {
+    return { items: [], totalItems: 0 };
+  }
+
+  const items = await listSavedProducts(owner);
+  const saved = items.map((item) => ({
+    savedId: item.savedId,
+    productId: item.productId,
+    title: item.product?.title || 'Unknown Product',
+    images: item.product?.images || [],
+    minPrice: item.product?.minPrice ? parseFloat(String(item.product.minPrice)) : null,
+    maxPrice: item.product?.maxPrice ? parseFloat(String(item.product.maxPrice)) : null,
+    category: item.product?.category || null,
+    url: item.product?.url || null,
+  }));
+
+  return { items: saved, totalItems: saved.length };
 }
 
 /**
@@ -672,9 +1110,8 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
     parameters: {
       type: "object",
       properties: {
-        userId: { type: "string", description: "The user ID" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
       },
-      required: ["userId"],
     },
     handler: getUserPreferencesTool,
   },
@@ -684,13 +1121,12 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
     parameters: {
       type: "object",
       properties: {
-        userId: { type: "string", description: "The user ID" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
         category: { type: "string", description: "Preferred category" },
         colors: { type: "array", items: { type: "string" }, description: "Preferred colors" },
         sizes: { type: "array", items: { type: "string" }, description: "Preferred sizes" },
         maxPrice: { type: "number", description: "Maximum budget" },
       },
-      required: ["userId"],
     },
     handler: setUserPreferencesTool,
   },
@@ -715,10 +1151,10 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
       properties: {
         productId: { type: "string", description: "The product ID to try on" },
         variantId: { type: "string", description: "Optional variant ID" },
-        userId: { type: "string", description: "The user ID" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
         confirmationToken: { type: "string", description: "Confirmation token from user accepting the suggestion" },
       },
-      required: ["productId", "userId", "confirmationToken"],
+      required: ["productId", "confirmationToken"],
     },
     handler: initiateTryOnTool,
   },
@@ -741,11 +1177,14 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
       type: "object",
       properties: {
         productId: { type: "string", description: "The product ID" },
+        cartCheckout: { type: "boolean", description: "Set true to prepare checkout from the current cart instead of a single product" },
+        cartItemIds: { type: "array", items: { type: "string" }, description: "Optional cart item IDs to checkout as a group" },
         variantId: { type: "string", description: "Optional variant ID" },
         quantity: { type: "number", description: "Quantity (default 1)" },
-        userId: { type: "string", description: "The user ID" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
+        sessionId: { type: "string", description: "Optional session context if needed." },
       },
-      required: ["productId", "userId"],
+      required: [],
     },
     handler: preparePurchaseTool,
   },
@@ -757,9 +1196,9 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
       properties: {
         purchaseIntentId: { type: "string", description: "Purchase intent ID from prepare_purchase" },
         confirmationToken: { type: "string", description: "Confirmation token from user confirming the purchase" },
-        userId: { type: "string", description: "The user ID" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
       },
-      required: ["purchaseIntentId", "confirmationToken", "userId"],
+      required: ["purchaseIntentId", "confirmationToken"],
     },
     handler: executePravaCheckoutTool,
   },
@@ -784,8 +1223,8 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
         productId: { type: "string", description: "The product ID to add" },
         variantId: { type: "string", description: "Optional variant ID (size/color)" },
         quantity: { type: "number", description: "Quantity to add (default 1)" },
-        userId: { type: "string", description: "The user ID (for authenticated users)" },
-        sessionId: { type: "string", description: "The session ID (for guest users)" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
+        sessionId: { type: "string", description: "Optional session context if needed." },
       },
       required: ["productId"],
     },
@@ -793,15 +1232,27 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
   },
   {
     name: "view_cart",
-    description: "View the current contents of the shopping cart.",
+    description: "View the current contents of the shopping cart, including totals.",
     parameters: {
       type: "object",
       properties: {
-        userId: { type: "string", description: "The user ID (for authenticated users)" },
-        sessionId: { type: "string", description: "The session ID (for guest users)" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
+        sessionId: { type: "string", description: "Optional session context if needed." },
       },
     },
     handler: viewCartTool,
+  },
+  {
+    name: "view_saved_products",
+    description: "View the current saved products or wishlist.",
+    parameters: {
+      type: "object",
+      properties: {
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
+        sessionId: { type: "string", description: "Optional session context if needed." },
+      },
+    },
+    handler: viewSavedProductsTool,
   },
   {
     name: "update_cart_item",
@@ -811,8 +1262,8 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
       properties: {
         cartItemId: { type: "string", description: "The cart item ID to update" },
         quantity: { type: "number", description: "New quantity (0 to remove)" },
-        userId: { type: "string", description: "The user ID (for authenticated users)" },
-        sessionId: { type: "string", description: "The session ID (for guest users)" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
+        sessionId: { type: "string", description: "Optional session context if needed." },
       },
       required: ["cartItemId", "quantity"],
     },
@@ -825,8 +1276,8 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
       type: "object",
       properties: {
         cartItemId: { type: "string", description: "The cart item ID to remove" },
-        userId: { type: "string", description: "The user ID (for authenticated users)" },
-        sessionId: { type: "string", description: "The session ID (for guest users)" },
+        userId: { type: "string", description: "Injected by the backend. Do not ask the user for this." },
+        sessionId: { type: "string", description: "Optional session context if needed." },
       },
       required: ["cartItemId"],
     },
@@ -838,9 +1289,11 @@ const TOOLS: Array<{ name: string; description: string; parameters: any; handler
 // System Prompt
 // ============================================================================
 
-const SYSTEM_PROMPT = `You are a helpful clothing-shopping agent for OpenCommerceLens.
-
+const SYSTEM_PROMPT = `You are a helpful humorous clothing-shopping agent for OpenCommerceLens.
+You have to reply users in a conversational and concise manner, guiding them through the shopping experience.
+if they greet you,answer properly, greet them back with humour and ask how you can help.
 Help users discover, compare, try on and purchase clothes from our curated collection.
+Never ask the user for their user ID, login, or session ID. Identity is injected by the backend, and guest users should continue with the current session context.
 
 VISUAL SEARCH:
 When users upload an image, they want to find visually similar clothing items. The system has already performed visual search and returned matching products. Present these results helpfully, describing how each item relates to what they uploaded.
@@ -865,18 +1318,26 @@ WORKFLOW FOR TRY-ON:
 3. Use initiate_try_on with the confirmation token
 
 WORKFLOW FOR PURCHASE:
-1. Use prepare_purchase to show the full purchase summary
-2. Wait for user to confirm
-3. Use execute_prava_checkout with the confirmation token
-4. Use get_purchase_status to verify success
+1. If the user wants to checkout a single product, use prepare_purchase for that product and show the full purchase summary.
+2. If the user wants to checkout their cart, always call view_cart first and inspect the merchant groups.
+3. Never guess totals. Always use the backend totals from view_cart or prepare_purchase.
+4. Present the merchant, items, and total clearly, then stop and wait for an explicit confirmation like "confirm" or "yes".
+5. After confirmation, call prepare_purchase for exactly one merchant group at a time.
+6. If the cart contains multiple merchants, do not combine them into one session. Process merchant groups sequentially: Merchant 1 of N, then Merchant 2 of N, and so on.
+7. After prepare_purchase returns an approval URL, present it and keep the UI in checkout state.
+8. After the user approves in Prava, call get_purchase_status to verify success.
+9. Only mark the checkout as complete after get_purchase_status reports success for the current merchant group.
 
 WORKFLOW FOR CART:
-1. Use add_to_cart to add products to the cart
-2. Use view_cart to show the user what's in their cart
-3. Use update_cart_item to change quantities
-4. Use remove_from_cart to remove items
-5. After cart changes, use view_cart to show the updated cart
-6. The user can proceed to checkout from the cart view
+1. Use add_to_cart to add products to the cart.
+2. Use view_cart to show the user what's in their cart, including totals and merchant groups.
+3. Use update_cart_item to change quantities.
+4. Use remove_from_cart to remove items.
+5. After cart changes, use view_cart to show the updated cart.
+6. If the user says "checkout my cart" or similar, call view_cart first and then prepare_purchase for the first merchant group in the cart.
+7. If the cart has multiple merchants, explain clearly that checkout must be split by merchant and only one Prava session can be prepared at a time.
+8. Continue with the next merchant group only after the previous merchant group has been approved and completed.
+9. If the user asks what is saved, use view_saved_products.
 
 Keep responses conversational but concise. Use tools efficiently - don't make unnecessary calls.`;
 
@@ -891,6 +1352,7 @@ export interface RunAgentOptions {
   imageUrl?: string; // Optional image for visual search
   conversationHistory?: AgentMessage[];
   shoppingState?: ShoppingState;
+  sessionKnowledge?: SessionKnowledge;
 }
 
 /**
@@ -941,13 +1403,20 @@ export interface RunAgentStreamOptions extends RunAgentOptions {
  * Sends events to the frontend via the callback
  */
 export async function runAgentStream(options: RunAgentStreamOptions): Promise<any[]> {
-  const { sessionId, userId, message, imageUrl, conversationHistory = [], shoppingState, onEvent } = options;
+  const { sessionId, userId, message, imageUrl, conversationHistory = [], shoppingState, sessionKnowledge, onEvent } = options;
+
+  console.log(`[CHAT_FLOW ${sessionId}] runAgentStream_start`, {
+    messageLength: message?.length || 0,
+    historyCount: conversationHistory.length,
+    hasImage: !!imageUrl,
+    hasShoppingState: !!shoppingState,
+    hasSessionKnowledge: !!sessionKnowledge,
+  });
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: SYSTEM_PROMPT },
   ];
 
-  // Add conversation context with current state
   if (shoppingState) {
     const contextPrompt = `\n\nCURRENT SHOPPING STATE:
 - Visible products: ${shoppingState.visibleProductIds.length} items
@@ -960,152 +1429,296 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
     messages.push({ role: "system", content: contextPrompt });
   }
 
-  // Add conversation history
+  const sessionKnowledgePrompt = buildSessionKnowledgeContext(sessionKnowledge);
+  if (sessionKnowledgePrompt) {
+    messages.push({ role: "system", content: sessionKnowledgePrompt });
+  }
+
+  const normalizeContent = (value: unknown) => {
+    if (typeof value === "string") {
+      return value;
+    }
+    if (value === null || value === undefined) {
+      return "";
+    }
+    return String(value);
+  };
+
   for (const msg of conversationHistory.slice(-10)) {
     if (msg.role === "user") {
-      messages.push({ role: "user", content: msg.content });
+      messages.push({ role: "user", content: normalizeContent(msg.content) });
     } else if (msg.role === "assistant") {
-      messages.push({ role: "assistant", content: msg.content });
+      messages.push({ role: "assistant", content: normalizeContent(msg.content) });
     }
   }
 
-  // Build user message content
   let userContent = message;
+  if (sessionKnowledge?.pendingConfirmation && isBareConfirmation(message)) {
+    userContent = `${message}\n\n[Session confirmation context: the user is confirming the current ${sessionKnowledge.pendingConfirmation} flow. Current purchase intent: ${sessionKnowledge.purchaseIntentId || "none"}. Pending confirmation: ${sessionKnowledge.pendingConfirmation}.]`;
+  }
   if (imageUrl) {
     userContent = `${message}\n\n[User uploaded an image for visual search: ${imageUrl}]`;
   }
   messages.push({ role: "user", content: userContent });
 
-  let chatState: ChatState = DEFAULT_CHAT_STATE;
-  const toolNamesUsed = new Set<string>();
-  const emitChatState = (nextState: ChatState, reason?: string, meta: { hasProducts?: boolean; productCount?: number; requiresInput?: boolean } = {}) => {
-    if (chatState === nextState && !reason) {
-      return;
-    }
-    chatState = nextState;
-    onEvent(createChatStateEvent(nextState, reason, meta));
-  };
-
-  // If imageUrl is provided, perform visual search first and include results
-  let visualSearchResults = null;
-  onEvent(createChatStateEvent(chatState, "conversation_started", { requiresInput: true }));
-  if (imageUrl) {
-    try {
-      visualSearchResults = await vectorSearchProducts({ imageUrl }, 12);
-      
-      // Send visual search results as an event
-      const visualProducts = visualSearchResults.map((r) => ({
-        productId: r.productId,
-        title: r.title,
-        images: r.images || [],
-        minPrice: r.minPrice,
-        maxPrice: r.maxPrice,
-        category: r.category,
-        url: r.url,
-      }));
-      onEvent({
-        event: "ui_payload",
-        data: {
-          type: "replace_catalog",
-          products: visualProducts,
-        },
-      });
-      emitChatState("show_catalog", "visual_search_results", {
-        hasProducts: visualProducts.length > 0,
-        productCount: visualProducts.length,
-        requiresInput: false,
-      });
-    } catch (error) {
-      console.error("Visual search failed:", error);
-    }
-  }
-
-  // Build tool definitions
-  const toolDefs: OpenAI.Chat.ChatCompletionTool[] = TOOLS.map(t => ({
-    type: "function" as const,
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    },
-  }));
-
-  let assistantMessage: string = "";
+  let assistantMessage = "";
   let toolResults: Array<{ role: "tool"; tool_call_id: string; content: string }> = [];
   let actions: UIAction[] = [];
   let uiPayload: UIPayload = DEFAULT_UI_PAYLOAD;
+  let chatState: ChatState = DEFAULT_CHAT_STATE;
+  const toolNamesUsed = new Set<string>();
+  const toolDefs = TOOLS.map((tool) => ({
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    },
+  }));
+  const emitChatState = (
+    state: ChatState,
+    reason?: string,
+    meta: { hasProducts?: boolean; productCount?: number; requiresInput?: boolean } = {},
+  ) => {
+    chatState = state;
+    onEvent(createChatStateEvent(state, reason, meta));
+  };
+  const pushToolMessage = (toolCallId: string, result: unknown) => {
+    toolResults.push({
+      role: "tool",
+      tool_call_id: toolCallId,
+      content: typeof result === "string" ? result : JSON.stringify(result),
+    });
+  };
 
-  // If we already have visual search results, set them as the initial uiPayload
-  if (visualSearchResults && visualSearchResults.length > 0) {
-    uiPayload = {
-      type: "replace_catalog",
-      products: visualSearchResults.map((r) => ({
-        productId: r.productId,
-        title: r.title,
-        images: r.images || [],
-        minPrice: r.minPrice,
-        maxPrice: r.maxPrice,
-        category: r.category,
-        url: r.url,
-      })),
-    };
+  const confirmationIntent = sessionKnowledge?.pendingConfirmation === "checkout" && isBareConfirmation(message);
+  const cartCheckoutIntent = isCartCheckoutIntent(message);
+
+  if (confirmationIntent && (sessionKnowledge?.purchaseIntentId || sessionKnowledge?.paymentSessionId)) {
+    const purchaseIntentId = sessionKnowledge.purchaseIntentId || sessionKnowledge.paymentSessionId || "";
+    const confirmationToken = `confirm_${sessionId}_${Date.now()}`;
+
+    console.log(`[CHAT_FLOW ${sessionId}] checkout_confirmation_shortcut`, {
+      purchaseIntentId,
+      pendingConfirmation: sessionKnowledge?.pendingConfirmation || "none",
+    });
+
+    onEvent({
+      event: "tool_call",
+      data: { name: "execute_prava_checkout", arguments: { purchaseIntentId, confirmationToken } },
+    });
+    const result = await executePravaCheckoutTool({
+      purchaseIntentId,
+      confirmationToken,
+      userId,
+    });
+    toolNamesUsed.add("execute_prava_checkout");
+    onEvent({
+      event: "tool_result",
+      data: { name: "execute_prava_checkout", result },
+    });
+
+    const checkoutResult: any = result;
+    assistantMessage = checkoutResult.message || "Checkout initiated. Awaiting Prava approval...";
+    if (checkoutResult.approvalUrl || checkoutResult.approvalRequired) {
+      uiPayload = {
+        type: "payment_pending",
+        purchaseIntentId: checkoutResult.purchaseIntentId || checkoutResult.orderId || purchaseIntentId,
+        approvalUrl: checkoutResult.approvalUrl || null,
+        providerSessionId: checkoutResult.providerSessionId || null,
+      };
+      onEvent({ event: "ui_payload", data: uiPayload });
+      emitChatState("checkout", "prava_approval_pending", { requiresInput: true });
+    }
+
+    onEvent({ event: "text", data: assistantMessage });
+    messages.push({ role: "assistant", content: assistantMessage });
+    const derivedState = deriveChatState(uiPayload, assistantMessage, toolNamesUsed);
+    onEvent({
+      event: "done",
+      data: {
+        reply: assistantMessage,
+        uiPayload: safeValidateUIPayload(uiPayload),
+        actions: actions.slice(0, 10),
+        messages: messages as any,
+        chatState: derivedState,
+      },
+    });
+    return messages;
   }
 
-  // Agent loop (max 8 iterations)
+  if (cartCheckoutIntent) {
+    console.log(`[CHAT_FLOW ${sessionId}] checkout_cart_shortcut`, {
+      pendingConfirmation: sessionKnowledge?.pendingConfirmation || "none",
+      purchaseIntentId: sessionKnowledge?.purchaseIntentId || null,
+      paymentSessionId: sessionKnowledge?.paymentSessionId || null,
+    });
+
+    onEvent({
+      event: "tool_call",
+      data: { name: "view_cart", arguments: { userId, sessionId } },
+    });
+    const cartResult = await viewCartTool({ userId, sessionId });
+    toolNamesUsed.add("view_cart");
+    onEvent({
+      event: "tool_result",
+      data: { name: "view_cart", result: cartResult },
+    });
+
+    if (!cartResult.items?.length || !cartResult.merchantGroups?.length) {
+      assistantMessage = "Your cart is empty right now.";
+      onEvent({ event: "text", data: assistantMessage });
+      emitChatState("chat", "empty_cart", { requiresInput: true });
+      const derivedState = deriveChatState(uiPayload, assistantMessage, toolNamesUsed);
+      onEvent({
+        event: "done",
+        data: {
+          reply: assistantMessage,
+          uiPayload: safeValidateUIPayload(uiPayload),
+          actions: actions.slice(0, 10),
+          messages: messages as any,
+          chatState: derivedState,
+        },
+      });
+      return messages;
+    }
+
+    const firstGroup = cartResult.merchantGroups[0];
+    const firstGroupCartItemIds = (firstGroup.items || []).map((item: any) => item.cartItemId).filter(Boolean);
+
+    onEvent({
+      event: "tool_call",
+      data: {
+        name: "prepare_purchase",
+        arguments: { userId, sessionId, cartCheckout: true, cartItemIds: firstGroupCartItemIds },
+      },
+    });
+    const purchaseResult = await preparePurchaseTool({
+      userId,
+      sessionId,
+      cartCheckout: true,
+      cartItemIds: firstGroupCartItemIds,
+    });
+    toolNamesUsed.add("prepare_purchase");
+    onEvent({
+      event: "tool_result",
+      data: { name: "prepare_purchase", result: purchaseResult },
+    });
+
+    if (purchaseResult.multiMerchant) {
+      assistantMessage = purchaseResult.message || `Your cart has ${cartResult.totalItems} items across multiple merchants.`;
+      onEvent({ event: "text", data: assistantMessage });
+      emitChatState("checkout", "cart_multi_merchant", { requiresInput: true });
+      const derivedState = deriveChatState(uiPayload, assistantMessage, toolNamesUsed);
+      onEvent({
+        event: "done",
+        data: {
+          reply: assistantMessage,
+          uiPayload: safeValidateUIPayload(uiPayload),
+          actions: actions.slice(0, 10),
+          messages: messages as any,
+          chatState: derivedState,
+        },
+      });
+      return messages;
+    }
+
+    if (purchaseResult.purchaseIntentId) {
+      assistantMessage = purchaseResult.message || `Cart checkout prepared for ${purchaseResult.merchant || "your cart"}.`;
+      uiPayload = {
+        type: "confirm_purchase",
+        purchase: {
+          productId: purchaseResult.productId || "",
+          variantId: (purchaseResult as any).variantId || "",
+          productName: purchaseResult.productName || "",
+          variant: purchaseResult.variant || "Standard",
+          merchant: purchaseResult.merchant || "Partner Store",
+          itemPrice: typeof purchaseResult.itemPrice === "number" ? purchaseResult.itemPrice : 0,
+          shipping: typeof purchaseResult.shipping === "number" ? purchaseResult.shipping : 0,
+          taxes: typeof purchaseResult.taxes === "number" ? purchaseResult.taxes : 0,
+          total: typeof purchaseResult.total === "number" ? purchaseResult.total : 0,
+          purchaseIntentId: purchaseResult.purchaseIntentId,
+          paymentSessionId: purchaseResult.paymentSessionId || purchaseResult.purchaseIntentId,
+          providerSessionId: purchaseResult.providerSessionId || undefined,
+          approvalUrl: purchaseResult.approvalUrl || null,
+          currency: purchaseResult.currency || "USD",
+        },
+      };
+      onEvent({ event: "text", data: assistantMessage });
+      onEvent({ event: "ui_payload", data: uiPayload });
+      emitChatState("checkout", "purchase_prepared", { requiresInput: true });
+      messages.push({ role: "assistant", content: assistantMessage });
+      const derivedState = deriveChatState(uiPayload, assistantMessage, toolNamesUsed);
+      onEvent({
+        event: "done",
+        data: {
+          reply: assistantMessage,
+          uiPayload: safeValidateUIPayload(uiPayload),
+          actions: actions.slice(0, 10),
+          messages: messages as any,
+          chatState: derivedState,
+        },
+      });
+      return messages;
+    }
+  }
+
   for (let turn = 0; turn < 8; turn++) {
     try {
       toolResults = [];
-      const response = await openai.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages,
-        tools: toolDefs,
-        tool_choice: "auto",
-        max_tokens: 2048,
-      });
+      console.log(`[CHAT_FLOW ${sessionId}] openai_turn_start`, { turn, messageCount: messages.length, toolCount: toolDefs.length });
+      const response = await withTimeout(
+        openai.chat.completions.create({
+          model: OPENAI_MODEL,
+          messages,
+          tools: toolDefs,
+          tool_choice: "auto",
+        }),
+        45000,
+        `OpenAI turn ${turn + 1}`
+      );
+      console.log(`[CHAT_FLOW ${sessionId}] openai_turn_end`, { turn, hasChoice: !!response.choices?.[0] });
 
       const choice = response.choices[0];
       if (!choice.message) break;
 
-      // Handle text response - stream it
       if (choice.message.content) {
         assistantMessage = choice.message.content;
         onEvent({ event: "text", data: choice.message.content });
       }
 
-      // Handle tool calls
       const toolCalls = (choice.message as any).tool_calls;
       if (toolCalls && toolCalls.length > 0) {
         for (const toolCall of toolCalls) {
           const toolName = toolCall.function?.name || toolCall.name;
           const args = JSON.parse(toolCall.function?.arguments || "{}");
           toolNamesUsed.add(toolName);
-          
-          // Stream tool call event
+
           onEvent({
             event: "tool_call",
             data: { name: toolName, arguments: args },
           });
 
-          // Inject userId where needed
-          if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "prepare_purchase", "execute_prava_checkout", "add_to_cart", "view_cart", "update_cart_item", "remove_from_cart"].includes(toolName)) {
+          if (["get_user_preferences", "set_user_preferences", "initiate_try_on", "prepare_purchase", "execute_prava_checkout", "add_to_cart", "view_cart", "view_saved_products", "update_cart_item", "remove_from_cart"].includes(toolName)) {
             args.userId = userId;
           }
+          if (["prepare_purchase", "view_cart", "execute_prava_checkout"].includes(toolName)) {
+            args.sessionId = sessionId;
+          }
 
-          // Find and execute tool
-          const tool = TOOLS.find(t => t.name === toolName);
+          const tool = TOOLS.find((t) => t.name === toolName);
           if (tool) {
             try {
-              const result = await tool.handler(args);
-              
-              // Stream tool result
+              console.log(`[CHAT_FLOW ${sessionId}] tool_start`, { turn, toolName });
+              const result = await withTimeout(Promise.resolve(tool.handler(args)), 30000, `Tool ${toolName}`);
+              console.log(`[CHAT_FLOW ${sessionId}] tool_end`, { turn, toolName });
+
               onEvent({
                 event: "tool_result",
                 data: { name: toolName, result },
               });
 
-              // Validate and track special results
               if (toolName === "search_catalog" && result.products) {
-                // Validate products
                 const validProducts = safeValidateProducts(result.products);
                 uiPayload = {
                   type: "replace_catalog",
@@ -1125,52 +1738,61 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
                 actions.push(action);
                 onEvent({ event: "ui_action", data: action });
                 emitChatState("tryon", "try_on_suggested", { requiresInput: true });
-              } else if (toolName === "prepare_purchase" && result.purchaseIntentId) {
-                // Validate purchase summary
-                const purchase = {
-                  productId: result.productId || "",
-                  variantId: result.variantId || "",
-                  productName: result.productName || "",
-                  variant: result.variant || "Standard",
-                  merchant: result.merchant || "Partner Store",
-                  itemPrice: typeof result.itemPrice === "number" ? result.itemPrice : 0,
-                  shipping: typeof result.shipping === "number" ? result.shipping : 0,
-                  taxes: typeof result.taxes === "number" ? result.taxes : 0,
-                  total: typeof result.total === "number" ? result.total : 0,
-                  currency: result.currency || "USD",
-                };
-                uiPayload = {
-                  type: "confirm_purchase",
-                  purchase,
-                };
-                onEvent({ event: "ui_payload", data: uiPayload });
-                emitChatState("checkout", "purchase_prepared", { requiresInput: true });
+              } else if (toolName === "prepare_purchase") {
+                if (result.multiMerchant) {
+                  assistantMessage = result.message || assistantMessage;
+                } else if (result.purchaseIntentId) {
+                  const purchase = {
+                    productId: result.productId || "",
+                    variantId: result.variantId || "",
+                    productName: result.productName || "",
+                    variant: result.variant || "Standard",
+                    merchant: result.merchant || "Partner Store",
+                    itemPrice: typeof result.itemPrice === "number" ? result.itemPrice : 0,
+                    shipping: typeof result.shipping === "number" ? result.shipping : 0,
+                    taxes: typeof result.taxes === "number" ? result.taxes : 0,
+                    total: typeof result.total === "number" ? result.total : 0,
+                    purchaseIntentId: result.purchaseIntentId || undefined,
+                    paymentSessionId: result.paymentSessionId || result.purchaseIntentId || undefined,
+                    providerSessionId: result.providerSessionId || undefined,
+                    approvalUrl: result.approvalUrl || null,
+                    currency: result.currency || "USD",
+                  };
+                  uiPayload = {
+                    type: "confirm_purchase",
+                    purchase,
+                  };
+                  onEvent({ event: "ui_payload", data: uiPayload });
+                  emitChatState("checkout", "purchase_prepared", { requiresInput: true });
+                }
+              } else if (toolName === "execute_prava_checkout") {
+                if (result.approvalUrl || result.approvalRequired) {
+                  uiPayload = {
+                    type: "payment_pending",
+                    purchaseIntentId: result.purchaseIntentId || result.orderId || "",
+                    approvalUrl: result.approvalUrl || null,
+                    providerSessionId: result.providerSessionId || null,
+                  };
+                  onEvent({ event: "ui_payload", data: uiPayload });
+                  emitChatState("checkout", "prava_approval_pending", { requiresInput: true });
+                }
               }
 
-              toolResults.push({
-                role: "tool",
-                tool_call_id: toolCall.id,
-                content: JSON.stringify(result),
-              });
+              pushToolMessage(toolCall.id, result);
             } catch (error: any) {
               console.error(`Tool ${toolName} error:`, error);
-              toolResults.push({
-                role: "tool",
-                tool_call_id: toolCall.id,
-                content: JSON.stringify({ error: error.message }),
-              });
+              pushToolMessage(toolCall.id, { error: error.message });
             }
           } else {
-            toolResults.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
-            });
+            pushToolMessage(toolCall.id, { error: `Unknown tool: ${toolName}` });
           }
         }
 
-        // Add assistant message and tool results
-        messages.push(choice.message as OpenAI.Chat.ChatCompletionMessage);
+        messages.push({
+          role: "assistant",
+          content: normalizeContent(choice.message.content),
+          ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        } as OpenAI.Chat.ChatCompletionMessageParam);
         for (const result of toolResults) {
           messages.push({
             role: "tool",
@@ -1179,7 +1801,6 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
           } as any);
         }
       } else {
-        // No tool calls, we're done
         break;
       }
     } catch (error: any) {
@@ -1206,7 +1827,6 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
     },
   );
 
-   // Send final event with complete response
   onEvent({
     event: "done",
     data: {
@@ -1231,6 +1851,24 @@ When user says "the third one" or similar, use visibleProductIds to resolve.`;
 export function isAgentAvailable(): boolean {
   return !!OPENAI_API_KEY;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

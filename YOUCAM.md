@@ -105,3 +105,8 @@ Where it's genuinely useful: **during your own Day 4-5 build**, point Claude Des
 | User asks in chat, referencing context | Yes — which garment(s)? | Agent resolves `garmentIds[]` → same `initiate_tryon` call |
 | Ingestion-time image prep | None, no user present | Direct batch job, polling is fine (no concurrency pressure) |
 | Exploring the API's shape during build | N/A — it's you, not a user | MCP via Claude Desktop, throwaway |
+
+
+
+
+

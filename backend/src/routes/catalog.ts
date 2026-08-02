@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { db, products, shops } from "../db/index.js";
+import { productSummarySelect } from "../db/product-select.js";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import { CatalogFiltersSchema } from "../types/api.js";
 import { defaultRateLimit } from "../middleware/rateLimit.js";
@@ -17,12 +18,28 @@ function serializeProduct(product: any) {
   return {
     id: product.id,
     shopId: product.shopId,
+
     title: product.title,
     description: product.description,
     category: product.category,
+    vendor: product.vendor,
+    productType: product.productType,
+    status: product.status,
     images: product.images,
+    primaryImage: Array.isArray(product.images) ? product.images[0] ?? null : null,
+    processedImages: product.processedImages,
+    variants: product.variants,
+    options: product.options ?? [],
+    collections: product.collections ?? [],
+    seo: product.seo ?? null,
     minPrice: product.minPrice ? parseFloat(String(product.minPrice)) : null,
     maxPrice: product.maxPrice ? parseFloat(String(product.maxPrice)) : null,
+    compareAtPriceMin: product.compareAtPriceMin ? parseFloat(String(product.compareAtPriceMin)) : null,
+    compareAtPriceMax: product.compareAtPriceMax ? parseFloat(String(product.compareAtPriceMax)) : null,
+    onSale: Boolean(product.onSale),
+    totalInventory: product.totalInventory ?? null,
+    requiresShipping: product.requiresShipping ?? null,
+    taxable: product.taxable ?? null,
     tags: product.tags,
     url: product.url,
   };
@@ -90,8 +107,8 @@ catalogRouter.get("/", async (req, res) => {
     }
 
     const results = conditions.length > 0
-      ? await db.select().from(products).where(and(...conditions))
-      : await db.select().from(products);
+      ? await db.select(productSummarySelect).from(products).where(and(...conditions))
+      : await db.select(productSummarySelect).from(products);
 
     const sorted = results.sort((a, b) => new Date(b.fetchedAt).getTime() - new Date(a.fetchedAt).getTime());
 
@@ -145,22 +162,10 @@ catalogRouter.get("/:id", async (req, res) => {
       return res.status(404).json({ error: "Product not found" });
     }
 
-    res.json({
-      id: product.id,
-      shopId: product.shopId,
-      title: product.title,
-      description: product.description,
-      category: product.category,
-      images: product.images,
-      processedImages: product.processedImages,
-      variants: product.variants,
-      minPrice: product.minPrice ? parseFloat(String(product.minPrice)) : null,
-      maxPrice: product.maxPrice ? parseFloat(String(product.maxPrice)) : null,
-      tags: product.tags,
-      url: product.url,
-    });
+    res.json(serializeProduct(product));
   } catch (error) {
     console.error("Product fetch error:", error);
     res.status(500).json({ error: "Failed to fetch product" });
   }
 });
+

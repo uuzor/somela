@@ -1,17 +1,47 @@
 import FilterBar from "./FilterBar";
 import ProductCard from "./ProductCard";
 import SelectedProductTray from "./SelectedProductTray";
+
+function getProductId(product) {
+  return product?.id || product?.productId || product?.raw?.productId || product?.raw?.id || null;
+}
+
 export default function SearchResults({
-  products,
+  products = [],
   selected,
+  selectedIds,
+  selectedProducts,
   onSelect,
+  onToggleSelect,
   onTry,
+  onAddToCart,
+  onToggleSaved,
   onCompare,
   onView,
   loading,
   reference,
+  filters,
+  onToggleFilter,
+  onClearFilters,
+  onCycleSort,
+  cartProductIds = [],
+  savedProductIds = [],
 }) {
-    console.log(products)
+  const activeSelectedIds = Array.isArray(selectedIds) && selectedIds.length > 0
+    ? selectedIds.filter(Boolean)
+    : selected
+      ? [getProductId(selected)].filter(Boolean)
+      : [];
+  const selectedSet = new Set(activeSelectedIds);
+  const resolvedSelectedProducts = Array.isArray(selectedProducts) && selectedProducts.length > 0
+    ? selectedProducts
+    : activeSelectedIds
+        .map((id) => products.find((product) => getProductId(product) === id))
+        .filter(Boolean);
+  const primarySelected = resolvedSelectedProducts[0] || selected || null;
+  const cartSet = new Set(Array.isArray(cartProductIds) ? cartProductIds.filter(Boolean) : []);
+  const savedSet = new Set(Array.isArray(savedProductIds) ? savedProductIds.filter(Boolean) : []);
+
   return (
     <div className="h-full flex flex-col">
       <div className="p-4">
@@ -30,37 +60,51 @@ export default function SearchResults({
             </p>
           </div>
         </div>
-        <FilterBar />
+        <FilterBar
+          filters={filters}
+          products={products}
+          onToggleFilter={onToggleFilter}
+          onClearFilters={onClearFilters}
+          onCycleSort={onCycleSort}
+        />
       </div>
       <div className="flex-1 overflow-y-auto px-4 grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 content-start">
         {loading ? (
           Array.from({ length: 8 }).map((_, i) => (
-            <ProductCard key={i} loading />
+            <ProductCard key={`loading-${i}`} loading />
           ))
         ) : products.length === 0 ? (
           <div className="col-span-full text-center py-20 text-muted-foreground text-sm">
-            No results yet — start a search from Discover.
+            No results yet - start a search from Discover.
           </div>
         ) : (
-          products.map((p) => (
-            <ProductCard
-              key={p.productId}
-              product={p}
-              selected={selected?.id === p.productId}
-              onSelect={() => onSelect(p)}
-              onTry={() => onTry(p)}
-            />
-          ))
+          products.map((product, index) => {
+            const productId = getProductId(product);
+            const isSelected = selectedSet.has(productId);
+            const cardKey = productId || product?.handle || product?.url || `${product?.title || product?.name || "product"}-${index}`;
+
+            return (
+              <ProductCard
+                key={cardKey}
+                product={product}
+                selected={isSelected}
+                saved={savedSet.has(productId)}
+                inCart={cartSet.has(productId)}
+                onSelect={() => (onToggleSelect ? onToggleSelect(product) : onSelect?.(product))}
+                onTry={() => onTry(product)}
+                onAddToCart={onAddToCart}
+                onToggleSaved={onToggleSaved}
+              />
+            );
+          })
         )}
       </div>
       <SelectedProductTray
-        product={selected}
-        onCompare={onCompare}
-        onTry={() => onTry(selected)}
-        onView={onView}
+        product={primarySelected}
+        onCompare={() => onCompare?.(resolvedSelectedProducts.length > 0 ? resolvedSelectedProducts : primarySelected ? [primarySelected] : [])}
+        onTry={() => onTry(primarySelected)}
+        onView={() => onView(primarySelected)}
       />
     </div>
   );
 }
-
-
