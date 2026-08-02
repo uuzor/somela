@@ -13,6 +13,7 @@ import { savedProductsRouter } from "./routes/saved-products.js";
 import { uploadRouter } from "./routes/upload.js";
 import { canvasRouter } from "./routes/canvas.js";
 import { paymentsRouter } from "./routes/payments.js";
+import { checkoutsRouter } from "./routes/checkouts.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -58,6 +59,7 @@ app.use("/api/saved-products", savedProductsRouter);
 app.use("/api/upload", uploadRouter); // Serves /api/upload/selfie, /api/upload/image, /api/upload/from-url
 app.use("/api/canvas", canvasRouter);
 app.use("/api/payments", paymentsRouter);
+app.use("/api/checkouts", checkoutsRouter);
 
 // Error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

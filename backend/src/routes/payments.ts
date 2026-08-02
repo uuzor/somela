@@ -20,6 +20,7 @@ import {
   reportPravaRemoteStatus,
   upsertPravaConnection,
 } from "../services/prava.js";
+import { getCheckoutByPaymentSession, syncCheckoutStatus } from "../services/checkouts.js";
 
 export const paymentsRouter = Router();
 paymentsRouter.use(defaultRateLimit);
@@ -289,9 +290,13 @@ paymentsRouter.get("/prava/sessions/:sessionId/result", async (req, res) => {
   try {
     const identity = await resolveRequestIdentity(req);
     if (!requireOwner(identity)) return res.status(401).json({ error: "Missing authorization or sessionId" });
-    const result = await getPravaPaymentResult({ userId: identity.userId, sessionId: identity.sessionId }, req.params.sessionId);
+    const owner = { userId: identity.userId, sessionId: identity.sessionId };
+    const result = await getPravaPaymentResult(owner, req.params.sessionId);
     if (!result) return res.status(404).json({ error: "Payment session not found" });
-    return res.json(result);
+    const checkout = await getCheckoutByPaymentSession(owner, req.params.sessionId);
+    if (!checkout || !result.remote) return res.json(result);
+    const synced = await syncCheckoutStatus(owner, checkout.id, async () => result.remote as any);
+    return res.json({ ...result, checkout: synced?.checkout || checkout });
   } catch (error) {
     console.error("Prava payment result fetch error:", error);
     res.status(500).json({ error: "Failed to fetch payment result" });

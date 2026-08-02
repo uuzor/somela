@@ -1,5 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import { db, pravaConnections, pravaMandates, pravaPaymentSessions, pravaTransactions, users } from "../db/index.js";
+import { createCheckoutForPaymentSession, sanitizePravaPaymentResult } from "./checkouts.js";
 
 const PRAVA_BASE_URL = process.env.PRAVA_BASE_URL || "https://sandbox.api.prava.space";
 const PRAVA_API_SECRET = process.env.PRAVA_API_SECRET;
@@ -52,6 +53,11 @@ export type PravaPaymentResult = {
 
 function hasOwner(owner: PravaOwner) { return Boolean(owner.userId || owner.sessionId); }
 function toNumber(value: string | number | null | undefined) { if (value === null || value === undefined) return null; return typeof value === "number" ? value : Number(value); }
+function sanitizePaymentSessionMetadata(value: unknown) {
+  if (!value || typeof value !== "object") return {};
+  const { sessionToken: _sessionToken, remoteSession: _remoteSession, ...safe } = value as Record<string, unknown>;
+  return safe;
+}
 function ownerFilter(owner: PravaOwner) { if (owner.userId) return eq(pravaPaymentSessions.userId, owner.userId); if (owner.sessionId) return eq(pravaPaymentSessions.sessionId, owner.sessionId); return null; }
 function mandateFilter(owner: PravaOwner) { if (owner.userId) return eq(pravaMandates.userId, owner.userId); if (owner.sessionId) return eq(pravaMandates.sessionId, owner.sessionId); return null; }
 function transactionFilter(owner: PravaOwner) { if (owner.userId) return eq(pravaTransactions.userId, owner.userId); if (owner.sessionId) return eq(pravaTransactions.sessionId, owner.sessionId); return null; }
@@ -65,7 +71,7 @@ async function resolvePravaOwnerEmail(owner: PravaOwner) {
 }
 
 function serializeConnection(row: any) { return row ? { id: row.id, userId: row.userId, sessionId: row.sessionId, provider: row.provider, providerAccountId: row.providerAccountId, providerSubject: row.providerSubject, email: row.email, displayName: row.displayName, status: row.status, metadata: row.metadata || {}, linkedAt: row.linkedAt, createdAt: row.createdAt, updatedAt: row.updatedAt } : null; }
-function serializePaymentSession(row: any) { return row ? { id: row.id, userId: row.userId, sessionId: row.sessionId, cartId: row.cartId, merchantName: row.merchantName, merchantUrl: row.merchantUrl, merchantCountry: row.merchantCountry, totalAmount: toNumber(row.totalAmount), currency: row.currency, status: row.status, approvalUrl: row.approvalUrl, providerSessionId: row.providerSessionId, providerCheckoutId: row.providerCheckoutId, expiresAt: row.expiresAt, metadata: row.metadata || {}, createdAt: row.createdAt, updatedAt: row.updatedAt } : null; }
+function serializePaymentSession(row: any) { return row ? { id: row.id, userId: row.userId, sessionId: row.sessionId, cartId: row.cartId, merchantName: row.merchantName, merchantUrl: row.merchantUrl, merchantCountry: row.merchantCountry, totalAmount: toNumber(row.totalAmount), currency: row.currency, status: row.status, approvalUrl: row.approvalUrl, providerSessionId: row.providerSessionId, providerCheckoutId: row.providerCheckoutId, expiresAt: row.expiresAt, metadata: sanitizePaymentSessionMetadata(row.metadata), createdAt: row.createdAt, updatedAt: row.updatedAt } : null; }
 function serializeMandate(row: any) { return row ? { id: row.id, userId: row.userId, sessionId: row.sessionId, scope: row.scope, frequency: row.frequency, merchantName: row.merchantName, merchantUrl: row.merchantUrl, merchantCountry: row.merchantCountry, amount: toNumber(row.amount), currency: row.currency, status: row.status, approvalUrl: row.approvalUrl, providerMandateId: row.providerMandateId, validFrom: row.validFrom, validUntil: row.validUntil, metadata: row.metadata || {}, createdAt: row.createdAt, updatedAt: row.updatedAt } : null; }
 function serializeTransaction(row: any) { return row ? { id: row.id, userId: row.userId, sessionId: row.sessionId, paymentSessionId: row.paymentSessionId, mandateId: row.mandateId, merchantName: row.merchantName, merchantUrl: row.merchantUrl, merchantCountry: row.merchantCountry, amount: toNumber(row.amount), currency: row.currency, status: row.status, providerTransactionId: row.providerTransactionId, approvalStatus: row.approvalStatus, authorizationCode: row.authorizationCode, errorCode: row.errorCode, errorMessage: row.errorMessage, metadata: row.metadata || {}, createdAt: row.createdAt, updatedAt: row.updatedAt } : null; }
 
@@ -174,7 +180,49 @@ export async function deletePravaConnection(owner: PravaOwner) { const filter = 
 
 export async function listPravaPaymentSessions(owner: PravaOwner) { const filter = ownerFilter(owner); if (!filter) return []; const rows = await db.select().from(pravaPaymentSessions).where(filter).orderBy(desc(pravaPaymentSessions.createdAt)); return rows.map(serializePaymentSession); }
 export async function getPravaPaymentSession(owner: PravaOwner, id: string) { const filter = ownerFilter(owner); if (!filter) return null; const [row] = await db.select().from(pravaPaymentSessions).where(and(filter, eq(pravaPaymentSessions.id, id))).limit(1); return serializePaymentSession(row); }
-export async function createPravaPaymentSession(owner: PravaOwner, input: PravaPaymentSessionInput) { if (!hasOwner(owner)) throw new Error("Missing Prava owner"); const ownerEmail = await resolvePravaOwnerEmail(owner); const remote = await createPravaRemoteSession({ userId: owner.userId || null, email: ownerEmail, amount: String(input.totalAmount), currency: input.currency, merchant: { name: input.merchantName, url: input.merchantUrl, countryCodeIso2: input.merchantCountry }, items: Array.isArray(input.metadata?.items) ? (input.metadata!.items as any[]) : [] }).catch((error) => { console.warn("Prava remote session create failed, falling back to local record:", error); return null; }); const [created] = await db.insert(pravaPaymentSessions).values({ userId: owner.userId || null, sessionId: owner.sessionId || null, cartId: input.cartId || null, merchantName: input.merchantName, merchantUrl: input.merchantUrl, merchantCountry: input.merchantCountry, totalAmount: String(input.totalAmount), currency: input.currency, status: remote ? "pending_approval" : (input.status || "draft"), approvalUrl: remote?.iframe_url ?? input.approvalUrl ?? null, providerSessionId: remote?.session_id ?? input.providerSessionId ?? null, providerCheckoutId: remote?.order_id ?? input.providerCheckoutId ?? null, expiresAt: remote?.expires_at ? new Date(remote.expires_at) : input.expiresAt ?? null, metadata: { ...(input.metadata || {}), ...(remote ? { sessionToken: remote.session_token, iframeUrl: remote.iframe_url, remoteSession: remote } : {}) } }).returning(); return serializePaymentSession(created); }
+export async function createPravaPaymentSession(owner: PravaOwner, input: PravaPaymentSessionInput) {
+  if (!hasOwner(owner)) throw new Error("Missing Prava owner");
+
+  const ownerEmail = await resolvePravaOwnerEmail(owner);
+  const remote = await createPravaRemoteSession({
+    userId: owner.userId || null,
+    email: ownerEmail,
+    amount: String(input.totalAmount),
+    currency: input.currency,
+    merchant: {
+      name: input.merchantName,
+      url: input.merchantUrl,
+      countryCodeIso2: input.merchantCountry,
+    },
+    items: Array.isArray(input.metadata?.items) ? input.metadata.items as any[] : [],
+  }).catch((error) => {
+    console.warn("Prava remote session create failed, falling back to local record:", error);
+    return null;
+  });
+
+  const [created] = await db.insert(pravaPaymentSessions).values({
+    userId: owner.userId || null,
+    sessionId: owner.sessionId || null,
+    cartId: input.cartId || null,
+    merchantName: input.merchantName,
+    merchantUrl: input.merchantUrl,
+    merchantCountry: input.merchantCountry,
+    totalAmount: String(input.totalAmount),
+    currency: input.currency,
+    status: remote ? "pending_approval" : (input.status || "draft"),
+    approvalUrl: remote?.iframe_url ?? input.approvalUrl ?? null,
+    providerSessionId: remote?.session_id ?? input.providerSessionId ?? null,
+    providerCheckoutId: remote?.order_id ?? input.providerCheckoutId ?? null,
+    expiresAt: remote?.expires_at ? new Date(remote.expires_at) : input.expiresAt ?? null,
+    metadata: {
+      ...(input.metadata || {}),
+      ...(remote ? { sessionToken: remote.session_token, iframeUrl: remote.iframe_url, remoteSession: remote } : {}),
+    },
+  }).returning();
+
+  const checkout = await createCheckoutForPaymentSession(owner, created, input.metadata || {});
+  return { ...serializePaymentSession(created), checkoutId: checkout?.id || null };
+}
 export async function updatePravaPaymentSession(owner: PravaOwner, id: string, patch: Partial<PravaPaymentSessionInput>) { const existing = await getPravaPaymentSession(owner, id); if (!existing) return null; const [updated] = await db.update(pravaPaymentSessions).set({ merchantName: patch.merchantName ?? existing.merchantName, merchantUrl: patch.merchantUrl ?? existing.merchantUrl, merchantCountry: patch.merchantCountry ?? existing.merchantCountry, totalAmount: patch.totalAmount !== undefined ? String(patch.totalAmount) : String(existing.totalAmount ?? 0), currency: patch.currency ?? existing.currency, status: patch.status ?? existing.status, approvalUrl: patch.approvalUrl ?? existing.approvalUrl ?? null, providerSessionId: patch.providerSessionId ?? existing.providerSessionId ?? null, providerCheckoutId: patch.providerCheckoutId ?? existing.providerCheckoutId ?? null, expiresAt: patch.expiresAt ?? existing.expiresAt ?? null, metadata: { ...(existing.metadata || {}), ...(patch.metadata || {}) }, updatedAt: new Date() }).where(eq(pravaPaymentSessions.id, id)).returning(); return serializePaymentSession(updated); }
 
 export async function listPravaMandates(owner: PravaOwner) { const filter = mandateFilter(owner); if (!filter) return []; const rows = await db.select().from(pravaMandates).where(filter).orderBy(desc(pravaMandates.createdAt)); return rows.map(serializeMandate); }
@@ -194,7 +242,7 @@ export async function getPravaPaymentResult(owner: PravaOwner, paymentSessionId:
   const remoteSessionId = local.providerSessionId || paymentSessionId;
   try {
     const remote = await getPravaRemotePaymentResult(remoteSessionId);
-    return { local, remote };
+    return { local, remote: sanitizePravaPaymentResult(remote) };
   } catch (error) {
     return {
       local,

@@ -37,3 +37,61 @@ CREATE INDEX IF NOT EXISTS checkouts_created_at_idx ON checkouts(created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS checkouts_payment_session_id_key ON checkouts(payment_session_id);
 CREATE INDEX IF NOT EXISTS checkouts_provider_session_id_idx ON checkouts(provider_session_id);
 CREATE INDEX IF NOT EXISTS checkouts_provider_order_id_idx ON checkouts(provider_order_id);
+
+INSERT INTO checkouts (
+  user_id,
+  session_id,
+  cart_id,
+  payment_session_id,
+  merchant_name,
+  merchant_url,
+  merchant_country,
+  currency,
+  subtotal,
+  shipping,
+  tax,
+  total,
+  items,
+  status,
+  provider_session_id,
+  provider_order_id,
+  approved_at,
+  completed_at,
+  failed_at,
+  metadata,
+  created_at,
+  updated_at
+)
+SELECT
+  user_id,
+  session_id,
+  cart_id,
+  id,
+  merchant_name,
+  merchant_url,
+  merchant_country,
+  currency,
+  total_amount,
+  0,
+  0,
+  total_amount,
+  COALESCE(metadata->'items', '[]'::jsonb),
+  CASE lower(status)
+    WHEN 'awaiting_result' THEN 'approved'
+    WHEN 'completed' THEN 'paid'
+    WHEN 'failed' THEN 'failed'
+    WHEN 'expired' THEN 'expired'
+    WHEN 'pending' THEN 'awaiting_approval'
+    WHEN 'pending_approval' THEN 'awaiting_approval'
+    ELSE 'created'
+  END,
+  provider_session_id,
+  provider_checkout_id,
+  CASE WHEN lower(status) IN ('awaiting_result', 'completed') THEN updated_at END,
+  CASE WHEN lower(status) = 'completed' THEN updated_at END,
+  CASE WHEN lower(status) = 'failed' THEN updated_at END,
+  jsonb_build_object('source', 'prava_session_backfill'),
+  created_at,
+  updated_at
+FROM prava_payment_sessions
+ON CONFLICT (payment_session_id) DO NOTHING;

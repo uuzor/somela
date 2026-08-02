@@ -19,6 +19,7 @@ import OpenAI from "openai";
 import { db, products, productVariants, userPreferences, sessions, tryonTasks, userSelfies, carts, cartItems, pravaPaymentSessions, pravaTransactions, shops } from "../db/index.js";
 import { createPravaPaymentSession, createPravaTransaction, updatePravaTransaction, getPravaRemotePaymentResult } from "../services/prava.js";
 import { hasSavedProductsOwner, listSavedProducts } from "../services/saved-products.js";
+import { sanitizePravaPaymentResult } from "../services/checkouts.js";
 import { productSummarySelect } from "../db/product-select.js";
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { searchCatalog } from "./catalog-query.js";
@@ -822,7 +823,7 @@ async function getPurchaseStatusTool(args: { purchaseIntentId: string }) {
       approvalStatus: "approved",
       metadata: {
         ...(transaction.metadata || {}),
-        remoteResult: remote,
+        remoteResult: sanitizePravaPaymentResult(remote),
       },
     });
   } else if (remoteStatus === "failed" && transaction) {
@@ -832,7 +833,7 @@ async function getPurchaseStatusTool(args: { purchaseIntentId: string }) {
       errorMessage: remote?.transactions?.[0]?.line_items?.[0]?.status || "Payment failed",
       metadata: {
         ...(transaction.metadata || {}),
-        remoteResult: remote,
+        remoteResult: sanitizePravaPaymentResult(remote),
       },
     });
   }
