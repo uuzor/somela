@@ -22,6 +22,7 @@ function nameFor(product) {
 }
 
 function jobProducts(job, fallback) {
+  if (job?.outfitProducts?.length) return job.outfitProducts;
   if (job?.products?.length) return job.products;
   if (Array.isArray(job?.product)) return job.product;
   if (job?.product) return [job.product];

@@ -208,17 +208,17 @@ export async function getProductDetails(id) {
 }
 
 export async function startTryOn(product, options = {}) {
-  const productIds = Array.isArray(product)
-    ? product.map((item) => (typeof item === "string" ? item : getProductId(item))).filter(Boolean)
-    : [typeof product === "string" ? product : getProductId(product)].filter(Boolean);
+  if (Array.isArray(product)) throw new Error("Apply one product at a time to the current look.");
+  const productIds = [typeof product === "string" ? product : getProductId(product)].filter(Boolean);
 
   if (productIds.length === 0) throw new Error("A valid product is required for try-on.");
-  const data = await request(productIds.length > 1 ? "/api/tryon/multi" : "/api/tryon", {
+  const data = await request("/api/tryon", {
     method: "POST",
     headers: userHeaders(options.userId),
     body: {
       productIds,
       selfieId: options.selfieId,
+      parentTaskId: options.parentTaskId,
     },
   });
 
@@ -233,6 +233,11 @@ export async function startTryOn(product, options = {}) {
     productIds: data.productIds || productIds,
     selfieId: data.selfieId || options.selfieId || null,
     selfie: options.selfie || null,
+    parentTaskId: data.parentTaskId || options.parentTaskId || null,
+    sourceImageUrl: data.sourceImageUrl || null,
+    garmentSlot: data.garmentSlot || null,
+    outfitState: data.outfitState || {},
+    outfitProducts: Array.isArray(options.outfitProducts) ? options.outfitProducts.map(normalizeProduct) : [],
     externalTaskId: data.externalTaskId,
     resultImageUrl: data.resultImageUrl || null,
     errorMessage: data.errorMessage || null,
@@ -252,6 +257,7 @@ export async function getTryOnStatus(job, options = {}) {
     ...data,
     id: job?.id || jobId,
     productIds: data.productIds || job?.productIds || [],
+    outfitProducts: data.outfitProducts?.length ? data.outfitProducts.map(normalizeProduct) : job?.outfitProducts || [],
   };
 }
 
@@ -266,6 +272,7 @@ export async function listTryOnJobs(options = {}) {
     id: job.taskId || job.id,
     productIds: Array.isArray(job.productIds) ? job.productIds : [],
     products: Array.isArray(job.products) ? job.products.map(normalizeProduct) : [],
+    outfitProducts: Array.isArray(job.outfitProducts) ? job.outfitProducts.map(normalizeProduct) : [],
   }));
 }
 

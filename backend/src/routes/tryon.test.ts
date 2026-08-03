@@ -5,16 +5,19 @@ const route = readFileSync("./src/routes/tryon.ts", "utf-8");
 const service = readFileSync("./src/services/tryon.ts", "utf-8");
 
 describe("try-on lifecycle", () => {
-  it("uses the shared asynchronous job service for single and multi try-on", () => {
+  it("uses the shared asynchronous job service for incremental try-on", () => {
     expect(route).toContain("startTryOnJob");
     expect(route).toContain('tryonRouter.post("/", tryonRateLimit');
     expect(route).toContain('tryonRouter.post("/multi", tryonRateLimit');
     expect(service).toContain("void processTryOnTask");
+    expect(route).toContain("Batch try-on has been replaced");
   });
 
-  it("limits outfit jobs to five products", () => {
-    expect(route).toContain(".min(1).max(5)");
-    expect(service).toContain("productIds.length > 5");
+  it("accepts exactly one product per persisted state", () => {
+    expect(route).toContain(".length(1)");
+    expect(service).toContain("productIds.length !== 1");
+    expect(service).toContain("parentTaskId");
+    expect(service).toContain("outfitState");
   });
 
   it("owner-scopes selfies and task status", () => {
@@ -26,6 +29,11 @@ describe("try-on lifecycle", () => {
   it("uses full-body classification for dresses", () => {
     expect(service).toContain("/dress|gown|jumpsuit|romper|full.?body/");
     expect(service).toContain('return "full_body"');
+  });
+
+  it("classifies footwear independently", () => {
+    expect(service).toContain("/shoe|sneaker|boot|heel|sandal|loafer|footwear/");
+    expect(service).toContain('return "shoes"');
   });
 
   it("verifies webhook signatures and persists successful results", () => {

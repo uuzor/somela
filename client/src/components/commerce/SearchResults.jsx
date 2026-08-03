@@ -109,7 +109,7 @@ export default function SearchResults({
         onRemove={onRemoveSelected}
         onClear={onClearSelected}
         onCompare={() => onCompare?.(resolvedSelectedProducts.length > 0 ? resolvedSelectedProducts : primarySelected ? [primarySelected] : [])}
-        onTry={(items) => onTry(items.length === 1 ? items[0] : items)}
+        onTry={(item) => onTry(item)}
         onView={(item) => onView(item || primarySelected)}
       />
     </div>

@@ -47,7 +47,7 @@ export interface YouCamTaskResult {
 export interface AIClothTaskParams {
   src_file_url: string;   // URL of the person/selfie image
   ref_file_url: string;  // URL of the garment/clothing image
-  garment_category?: "upper_body" | "lower_body" | "full_body";
+  garment_category?: "upper_body" | "lower_body" | "full_body" | "shoes";
 }
 
 export interface BackgroundRemovalParams {

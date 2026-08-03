@@ -17,7 +17,7 @@ function fail(message: string, status: number): never {
   throw error;
 }
 
-export function detectGarmentCategory(product: any): "upper_body" | "lower_body" | "full_body" {
+export function detectGarmentCategory(product: any): "upper_body" | "lower_body" | "full_body" | "shoes" {
   const combined = [
     product?.category,
     product?.productType,
@@ -25,6 +25,7 @@ export function detectGarmentCategory(product: any): "upper_body" | "lower_body"
     ...(Array.isArray(product?.tags) ? product.tags : []),
   ].filter(Boolean).join(" ").toLowerCase();
 
+  if (/shoe|sneaker|boot|heel|sandal|loafer|footwear/.test(combined)) return "shoes";
   if (/dress|gown|jumpsuit|romper|full.?body/.test(combined)) return "full_body";
   if (/denim|pant|jean|trouser|skirt|short|bottom|leg/.test(combined)) return "lower_body";
   if (/top|shirt|blouse|sweater|hoodie|jacket|coat|blazer/.test(combined)) return "upper_body";
@@ -152,8 +153,14 @@ export async function startTryOnJob(input: {
   const garmentSlot = detectGarmentCategory(productRecords[0]);
   const outfitState = {
     ...((parentTask?.outfitState as Record<string, string> | null) || {}),
-    [garmentSlot]: productIds[0],
   };
+  if (garmentSlot === "full_body") {
+    delete outfitState.upper_body;
+    delete outfitState.lower_body;
+  } else if (garmentSlot === "upper_body" || garmentSlot === "lower_body") {
+    delete outfitState.full_body;
+  }
+  outfitState[garmentSlot] = productIds[0];
 
   const [task] = await db.insert(tryonTasks).values({
     userId: input.userId,

@@ -54,6 +54,31 @@ function jobProductsForSignature(job) {
   return values.map(getProductKey);
 }
 
+function tryOnSlot(product) {
+  const text = [product?.category, product?.productType, product?.title, product?.name].filter(Boolean).join(" ").toLowerCase();
+  if (/dress|gown|jumpsuit|romper/.test(text)) return "full_body";
+  if (/pant|jean|trouser|skirt|short|bottom/.test(text)) return "lower_body";
+  if (/shoe|sneaker|boot|heel|sandal|loafer/.test(text)) return "shoes";
+  return "upper_body";
+}
+
+function nextOutfitProducts(parentJob, product) {
+  const current = parentJob?.outfitProducts?.length
+    ? parentJob.outfitProducts
+    : parentJob?.products?.length
+      ? parentJob.products
+      : [];
+  const slot = tryOnSlot(product);
+  const replaced = current.filter((item) => {
+    const itemSlot = tryOnSlot(item);
+    if (itemSlot === slot) return false;
+    if (slot === "full_body" && (itemSlot === "upper_body" || itemSlot === "lower_body")) return false;
+    if ((slot === "upper_body" || slot === "lower_body") && itemSlot === "full_body") return false;
+    return true;
+  });
+  return [...replaced, product];
+}
+
 function getProductKey(product) {
   return product?.id || product?.productId || null;
 }
@@ -959,17 +984,22 @@ export default function OpenCommerceLens() {
     setJobs((current) => current.map((item) => (item.id === jobId ? { ...item, ...patch } : item)));
   };
 
-  const runTryOn = async (nextProducts, selfie, placeholderId) => {
-    const productList = (Array.isArray(nextProducts) ? nextProducts : [nextProducts]).filter(Boolean);
-    const requestProduct = productList.length === 1 ? productList[0] : productList;
+  const runTryOn = async (nextProduct, selfie, placeholderId, parentJob = null) => {
+    const outfitProducts = nextOutfitProducts(parentJob, nextProduct);
     let activeJobId = placeholderId;
     try {
       const selfieId = selfie?.id || selfie?.selfieId;
-      const job = await api.startTryOn(requestProduct, { userId, selfieId, selfie });
+      const job = await api.startTryOn(nextProduct, {
+        userId,
+        selfieId,
+        selfie,
+        parentTaskId: parentJob?.id,
+        outfitProducts,
+      });
       activeJobId = job.id;
       setActiveTryOnId(job.id);
       setJobs((current) => [
-        { ...job, product: requestProduct, products: productList, selfie },
+        { ...job, product: nextProduct, products: [nextProduct], outfitProducts, selfie },
         ...current.filter((item) => item.id !== placeholderId && item.id !== job.id),
       ]);
 
@@ -978,7 +1008,13 @@ export default function OpenCommerceLens() {
       await api.pollTryOnStatus(job, {
         userId,
         signal: controller.signal,
-        onUpdate: (next) => updateTryOnJob(job.id, { ...next, product: requestProduct, products: productList, selfie }),
+        onUpdate: (next) => updateTryOnJob(job.id, {
+          ...next,
+          product: nextProduct,
+          products: [nextProduct],
+          outfitProducts,
+          selfie,
+        }),
       });
     } catch (error) {
       if (error?.name === "AbortError") return;
@@ -993,44 +1029,41 @@ export default function OpenCommerceLens() {
   };
 
   const startTry = async (product) => {
-    const nextProducts = (Array.isArray(product)
-      ? product
-      : product
-        ? [product]
-        : selectedProducts.length
-          ? selectedProducts
-          : [primarySelected || selected || products[0]]
-    ).filter(Boolean).slice(0, 5);
-    if (!nextProducts.length) return;
-
-    const signature = nextProducts.map(getProductKey).filter(Boolean).sort().join("|");
-    const duplicate = jobs.find((job) => {
-      if (["completed", "failed", "needs_selfie"].includes(job.status)) return false;
-      const ids = (job.productIds?.length ? job.productIds : jobProductsForSignature(job)).filter(Boolean).sort().join("|");
-      return ids === signature;
-    });
-    if (duplicate) {
-      setActiveTryOnId(duplicate.id);
+    if (Array.isArray(product)) {
+      toast({ title: "Choose one item", description: "Items are added to your look one at a time." });
+      return;
+    }
+    const nextProduct = product || primarySelected || selected || products[0];
+    if (!nextProduct) return;
+    if (activeTryOn && !["completed", "failed", "needs_selfie"].includes(activeTryOn.status)) {
+      toast({ title: "Try-on in progress", description: "Wait for the current item to finish before adding another." });
       setMode("tryon");
       return;
     }
+    const parentJob = activeTryOn?.status === "completed" ? activeTryOn : null;
 
-    setSelected(nextProducts[0]);
+    setSelected(nextProduct);
     setMode("tryon");
     const placeholderId = randomId("tryon");
     setActiveTryOnId(placeholderId);
     setJobs((current) => [{
       id: placeholderId,
-      product: nextProducts.length === 1 ? nextProducts[0] : nextProducts,
-      products: nextProducts,
-      productIds: nextProducts.map(getProductKey).filter(Boolean),
+      product: nextProduct,
+      products: [nextProduct],
+      outfitProducts: nextOutfitProducts(parentJob, nextProduct),
+      productIds: [getProductKey(nextProduct)].filter(Boolean),
+      parentTaskId: parentJob?.id || null,
       status: "starting",
       stage: "queued",
       currentStep: 0,
-      totalSteps: nextProducts.length,
+      totalSteps: 1,
     }, ...current]);
 
     try {
+      if (parentJob) {
+        await runTryOn(nextProduct, parentJob.selfie || null, placeholderId, parentJob);
+        return;
+      }
       const selfies = await api.listTryOnSelfies({ userId });
       let selfie = selfies.find((item) => item.isDefault) || selfies[0];
       if (!selfie) {
@@ -1045,7 +1078,7 @@ export default function OpenCommerceLens() {
         updateTryOnJob(placeholderId, { status: "selfie_processing", selfie });
         selfie = await api.waitForSelfie(selfie.id, { userId });
       }
-      await runTryOn(nextProducts, selfie, placeholderId);
+      await runTryOn(nextProduct, selfie, placeholderId);
     } catch (error) {
       updateTryOnJob(placeholderId, {
         status: "failed",
@@ -1057,22 +1090,23 @@ export default function OpenCommerceLens() {
 
   const uploadTryOnSelfie = async (file) => {
     const currentJob = jobs.find((job) => job.id === activeTryOnId);
-    const nextProducts = currentJob?.products?.length
-      ? currentJob.products
+    const nextProduct = currentJob?.products?.[0]
+      ? currentJob.products[0]
       : selectedProducts.length
-        ? selectedProducts
-        : [selected || primarySelected || products[0]].filter(Boolean);
+        ? selectedProducts[0]
+        : selected || primarySelected || products[0];
     const existing = currentJob && ["needs_selfie", "failed"].includes(currentJob.status) ? currentJob : null;
     const placeholderId = existing?.id || randomId("tryon");
     if (!existing) {
       setActiveTryOnId(placeholderId);
       setJobs((current) => [{
         id: placeholderId,
-        product: nextProducts.length === 1 ? nextProducts[0] : nextProducts,
-        products: nextProducts,
-        productIds: nextProducts.map(getProductKey).filter(Boolean),
+        product: nextProduct,
+        products: [nextProduct],
+        outfitProducts: [nextProduct],
+        productIds: [getProductKey(nextProduct)].filter(Boolean),
         status: "selfie_processing",
-        totalSteps: nextProducts.length,
+        totalSteps: 1,
       }, ...current]);
     } else {
       updateTryOnJob(placeholderId, { status: "selfie_processing", errorMessage: null });
@@ -1084,7 +1118,7 @@ export default function OpenCommerceLens() {
       if (selfie.status === "processing") {
         selfie = await api.waitForSelfie(selfie.selfieId, { userId });
       }
-      await runTryOn(nextProducts, selfie, placeholderId);
+      await runTryOn(nextProduct, selfie, placeholderId);
     } catch (error) {
       updateTryOnJob(placeholderId, {
         status: "failed",
@@ -1357,6 +1391,7 @@ export default function OpenCommerceLens() {
     api.listTryOnJobs({ userId, limit: 20, signal: controller.signal })
       .then((history) => {
         setJobs(history);
+        setActiveTryOnId(history.find((job) => job.status === "completed")?.id || null);
       })
       .catch((error) => {
         if (error?.name !== "AbortError") console.error("Try-on history load failed:", error);
