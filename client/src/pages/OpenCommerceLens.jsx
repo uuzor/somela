@@ -1030,7 +1030,10 @@ export default function OpenCommerceLens() {
 
   const startTry = async (product) => {
     if (Array.isArray(product)) {
-      toast({ title: "Choose one item", description: "Items are added to your look one at a time." });
+      const wardrobe = product.filter(Boolean).slice(0, 5);
+      if (!wardrobe.length) return;
+      setSelected(wardrobe[0]);
+      setMode("tryon");
       return;
     }
     const nextProduct = product || primarySelected || selected || products[0];
@@ -1459,6 +1462,7 @@ export default function OpenCommerceLens() {
         onMode={setMode}
         onUploadSelfie={uploadTryOnSelfie}
         onRetry={startTry}
+        onTryProduct={startTry}
         onSaveLook={(items) => Promise.all(items.map(handleSaveProduct))}
         onAddToCart={(items) => Promise.all(items.map((item) => handleAddToCart(item)))}
       />

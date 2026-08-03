@@ -27,6 +27,7 @@ setInterval(() => {
 export interface RateLimitConfig {
   windowMs: number;  // Time window in milliseconds
   max: number;        // Max requests per window
+  scope?: string;
 }
 
 const DEFAULT_CONFIG: RateLimitConfig = {
@@ -42,7 +43,8 @@ const STRICT_CONFIG: RateLimitConfig = {
 export function rateLimitMiddleware(config: RateLimitConfig = DEFAULT_CONFIG) {
   return (req: Request, res: Response, next: NextFunction) => {
     const ip = (req as any).ip || (req as any).socket?.remoteAddress || "unknown";
-    const key = `rate:${ip}`;
+    const scope = config.scope || `${config.windowMs}:${config.max}`;
+    const key = `rate:${scope}:${ip}`;
     const now = Date.now();
 
     let entry = rateLimitStore.get(key);
@@ -95,5 +97,6 @@ export const visualSearchRateLimit = rateLimitMiddleware({
 
 export const tryonRateLimit = rateLimitMiddleware({
   windowMs: 60 * 1000,
-  max: 5,  // 5 try-on requests per minute
+  max: 10,
+  scope: "tryon",
 });

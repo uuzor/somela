@@ -52,7 +52,6 @@ export default function SelectedProductTray({
 
   const total = selected.reduce((sum, item) => sum + toNumber(item?.minPrice ?? item?.price), 0);
   const currency = selected[0]?.currency || "USD";
-  const conflict = compatibility(selected);
   const batchSelected = selected.length > 1;
   const busy = activeTryOn && !["completed", "failed"].includes(activeTryOn.status);
   const currentStep = activeTryOn?.currentStep || 0;
@@ -85,12 +84,12 @@ export default function SelectedProductTray({
           <p className="text-xs font-medium flex items-center gap-1.5">
             <Layers3 size={14} />{selected.length} of {maxItems} selected
           </p>
-          <p className={"text-[10px] " + (conflict ? "text-destructive" : "text-muted-foreground")}>
+          <p className="text-[10px] text-muted-foreground">
             {busy
               ? "Applying selected item"
               : batchSelected
-                ? "Choose one item to add to the current look"
-                : conflict || `${formatMoney(total, currency)} estimated total`}
+                ? `${selected.length} items ready in your try-on wardrobe`
+                : `${formatMoney(total, currency)} estimated total`}
           </p>
         </div>
 
@@ -99,9 +98,9 @@ export default function SelectedProductTray({
           <button type="button" onClick={() => onCompare?.(selected)} className="control">
             <Scale size={15} />Compare
           </button>
-          <button type="button" onClick={() => onTry?.(selected[0])} className="primary" disabled={Boolean(conflict) || batchSelected || busy}>
+          <button type="button" onClick={() => onTry?.(selected)} className="primary" disabled={busy}>
             {busy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-            {busy ? "Generating" : batchSelected ? "Choose one" : "Add to look"}
+            {busy ? "Generating" : batchSelected ? "Open wardrobe" : "Try on"}
           </button>
         </div>
       </div>

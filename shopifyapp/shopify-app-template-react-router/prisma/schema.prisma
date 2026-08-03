@@ -1,0 +1,70 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+// Registered merchant (one per Shopify store)
+model Merchant {
+  id                  String    @id @default(cuid())
+  shop                String    @unique
+  plan                String    @default("none")
+  // plan values: none | Starter Plan | Growth Plan | Pro Plan
+  subscriptionId      String?
+  subscriptionStatus  String    @default("inactive")
+  // subscriptionStatus values: inactive | active | cancelled | frozen | pending
+  syncStatus          String    @default("never")
+  // syncStatus values: never | in_progress | complete | partial | failed
+  initialSyncComplete Boolean   @default(false)
+  lastSyncAt          DateTime?
+  installedAt         DateTime  @default(now())
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  products            Product[]
+}
+
+// One row per Shopify product per merchant store
+model Product {
+  id           String    @id @default(cuid())
+  shop         String
+  shopifyId    String    // Shopify GID: gid://shopify/Product/123
+  title        String
+  handle       String
+  vendor       String?
+  productType  String?
+  status       String    @default("pending")
+  // status values: pending | processing | indexed | failed | outdated | excluded
+  errorMessage String?
+  lastSyncedAt DateTime?
+  merchant     Merchant  @relation(fields: [shop], references: [shop])
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([shop, shopifyId])
+}

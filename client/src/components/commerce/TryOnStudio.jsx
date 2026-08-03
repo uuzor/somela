@@ -47,6 +47,7 @@ export default function TryOnStudio({
   onMode,
   onUploadSelfie,
   onRetry,
+  onTryProduct,
   onSaveLook,
   onAddToCart,
 }) {
@@ -55,6 +56,7 @@ export default function TryOnStudio({
   const [uploading, setUploading] = useState(false);
   const [view, setView] = useState("result");
   const currentJob = jobs.find((job) => job.id === activeJobId) || jobs[0] || null;
+  const wardrobeProducts = Array.isArray(products) && products.length ? products : [product].filter(Boolean);
   const selectedProducts = jobProducts(currentJob, products?.length ? products : product);
   const primaryProduct = selectedProducts[0] || product || null;
   const ready = currentJob?.status === "completed";
@@ -123,7 +125,7 @@ export default function TryOnStudio({
       />
 
       {phase === "prepare" && (
-        <div className="flex-1 grid lg:grid-cols-[minmax(0,1fr)_280px] gap-4 mt-4">
+        <div className="flex-1 grid lg:grid-cols-[minmax(0,1fr)_400px] gap-4 mt-4">
           <section className="panel p-5 grid place-items-center min-h-[420px]">
             {preview ? (
               <div className="w-full h-full flex flex-col items-center justify-center gap-4">
@@ -148,12 +150,15 @@ export default function TryOnStudio({
               </div>
             )}
           </section>
-          <GarmentStack products={selectedProducts} />
+          <aside>
+            <TryOnWardrobe products={wardrobeProducts} onTry={onTryProduct} disabled={uploading} />
+            {currentJob?.outfitProducts?.length > 0 && <GarmentStack products={selectedProducts} />}
+          </aside>
         </div>
       )}
 
       {phase === "generate" && (
-        <div className="flex-1 grid lg:grid-cols-[minmax(0,1fr)_280px] gap-4 mt-4">
+        <div className="flex-1 grid md:grid-cols-2 gap-4 mt-4">
           <section className="panel relative min-h-[460px] overflow-hidden grid place-items-center">
             {selfieImage ? (
               <img src={selfieImage} alt="Your try-on photo" className="w-full h-full max-h-[620px] object-contain bg-muted/40 opacity-60" />
@@ -169,6 +174,7 @@ export default function TryOnStudio({
             </div>
           </section>
           <aside>
+            <TryOnWardrobe products={wardrobeProducts} onTry={onTryProduct} disabled />
             <GarmentStack products={selectedProducts} />
             <TryOnQueue jobs={jobs} activeJobId={currentJob?.id} onSelect={onSelectJob} />
           </aside>
@@ -191,7 +197,8 @@ export default function TryOnStudio({
               </button>
             ))}
           </div>
-          <div className={"flex-1 grid gap-3 mt-3 min-h-[460px] " + (view === "side-by-side" ? "md:grid-cols-2" : "grid-cols-1")}>
+          <div className="flex-1 grid md:grid-cols-2 gap-4 mt-4">
+            <div className={"flex-1 grid gap-3 mt-3 min-h-[460px] " + (view === "side-by-side" ? "md:grid-cols-2" : "grid-cols-1")}>
             {(view === "before" || view === "side-by-side") && (
               <figure className="panel relative overflow-hidden">
                 <img src={selfieImage} alt="Original selfie" className="w-full h-full max-h-[640px] object-contain bg-muted/30" />
@@ -205,15 +212,21 @@ export default function TryOnStudio({
               </figure>
             )}
           </div>
-          <div className="panel p-3 mt-4 flex flex-wrap gap-2 items-center">
-            <button type="button" onClick={() => onRetry?.(selectedProducts.length === 1 ? primaryProduct : selectedProducts)} className="control">
+          <div className="flex flex-col gap-2 mt-3 p-6">
+            <div className="panel p-3 mt-4 flex flex-wrap gap-2 items-center">
+            <button type="button" onClick={() => onRetry?.(currentJob?.products?.[0] || primaryProduct)} className="control">
               <RefreshCcw size={15} />Try again
             </button>
             <button type="button" onClick={() => onSaveLook?.(selectedProducts)} className="control"><Heart size={15} />Save pieces</button>
             <button type="button" onClick={downloadResult} className="control"><Download size={15} />Download</button>
             <button type="button" onClick={() => onAddToCart?.(selectedProducts)} className="primary ml-auto"><ShoppingBag size={15} />Add look to cart</button>
           </div>
+          <TryOnWardrobe products={wardrobeProducts} onTry={onTryProduct} />
           <TryOnQueue jobs={jobs} activeJobId={currentJob?.id} onSelect={onSelectJob} />
+          </div>
+
+          </div>
+
         </>
       )}
 
@@ -247,6 +260,35 @@ function GarmentStack({ products }) {
               <p className="text-[10px] text-muted-foreground">{[item.color, item.size].filter(Boolean).join(" / ") || "Default variant"}</p>
               <p className="text-[10px]">{item.displayPrice || item.price || (item.minPrice != null ? "$" + item.minPrice : "")}</p>
             </div>
+          </div>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function TryOnWardrobe({ products, onTry, disabled = false }) {
+  if (!products.length) return null;
+  return (
+    <aside className="panel p-4 h-fit mb-3">
+      <div className="flex items-center gap-2 mb-3">
+        <Sparkles size={14} />
+        <div>
+          <h2 className="text-xs font-medium">Your try-on wardrobe</h2>
+          <p className="text-[10px] text-muted-foreground">Pick one item to apply to the current look.</p>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {products.slice(0, 5).map((item, index) => (
+          <div key={item.id || item.raw?.productId || index} className="flex items-center gap-2">
+            <img src={imageFor(item)} alt="" className="w-12 h-12 rounded-xl object-cover" />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium truncate">{nameFor(item)}</p>
+              <p className="text-[10px] text-muted-foreground">{item.displayPrice || item.price || (item.minPrice != null ? "$" + item.minPrice : "")}</p>
+            </div>
+            <button type="button" onClick={() => onTry?.(item)} className="control" disabled={disabled}>
+              <Sparkles size={13} />Try on
+            </button>
           </div>
         ))}
       </div>
