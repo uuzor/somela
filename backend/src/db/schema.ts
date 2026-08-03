@@ -219,6 +219,10 @@ export const tryonTasks = pgTable("tryon_tasks", {
   // Products being tried on
   productId: text("product_id"), // Single product for AI try-on
   productIds: jsonb("product_ids").$type<string[]>().default([]), // Multiple products
+  parentTaskId: uuid("parent_task_id"),
+  sourceImageUrl: text("source_image_url"),
+  garmentSlot: varchar("garment_slot", { length: 50 }),
+  outfitState: jsonb("outfit_state").$type<Record<string, string>>().default({}),
   
   // Images
   garmentImageUrl: text("garment_image_url"),
@@ -228,6 +232,10 @@ export const tryonTasks = pgTable("tryon_tasks", {
   // Task status
   externalTaskId: text("external_task_id"), // YouCam task ID
   status: varchar("status", { length: 50 }).default("pending").notNull(), // pending, processing, completed, failed
+  stage: varchar("stage", { length: 50 }).default("queued").notNull(),
+  currentStep: integer("current_step").default(0).notNull(),
+  totalSteps: integer("total_steps").default(1).notNull(),
+  currentProductId: text("current_product_id"),
   
   // Results
   resultImageUrl: text("result_image_url"),

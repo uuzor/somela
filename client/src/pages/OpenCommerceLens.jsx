@@ -45,6 +45,15 @@ function randomId(prefix) {
   return globalThis.crypto?.randomUUID?.() || `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function jobProductsForSignature(job) {
+  const values = job?.products?.length
+    ? job.products
+    : Array.isArray(job?.product)
+      ? job.product
+      : [job?.product].filter(Boolean);
+  return values.map(getProductKey);
+}
+
 function getProductKey(product) {
   return product?.id || product?.productId || null;
 }
@@ -205,6 +214,7 @@ export default function OpenCommerceLens() {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [reference, setReference] = useState();
   const [jobs, setJobs] = useState([]);
+  const [activeTryOnId, setActiveTryOnId] = useState(null);
   const [cart, setCart] = useState(cartSeed);
   const [savedProducts, setSavedProducts] = useState([]);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -247,24 +257,39 @@ export default function OpenCommerceLens() {
     const byId = new Map(visible.map((product) => [getProductKey(product), product]));
     return selectedProductIds.map((id) => byId.get(id)).filter(Boolean);
   }, [selectedProductIds, visible]);
+  const activeTryOn = useMemo(() => jobs.find((job) => job.id === activeTryOnId) || null, [activeTryOnId, jobs]);
+  const dockActiveTryOn = useMemo(() => {
+    if (!activeTryOn || !selectedProducts.length) return null;
+    const selectedSignature = selectedProducts.map(getProductKey).filter(Boolean).sort().join("|");
+    const jobSignature = (activeTryOn.productIds?.length ? activeTryOn.productIds : jobProductsForSignature(activeTryOn))
+      .filter(Boolean)
+      .sort()
+      .join("|");
+    return selectedSignature === jobSignature ? activeTryOn : null;
+  }, [activeTryOn, selectedProducts]);
   const primarySelected = selectedProducts[0] || selected || visible[0] || null;
   const checkoutPurchase = useMemo(() => buildCheckoutPurchase(cart, pendingPurchase), [cart, pendingPurchase]);
   const showPaymentNotice = (status) => {
     setPaymentSuccessStatus(status);
     setApprovalOpen(false);
-    setPaymentSuccessOpen(true);
-    toast({
-      title: status === "paid" ? "Payment successful" : "Payment approved",
-      description: status === "paid" ? "The merchant confirmed your payment." : "Prava approved the payment. Merchant confirmation is pending.",
-    });
+    setPaymentSuccessOpen(status === "paid");
+    if (status !== "paid") {
+      toast({
+        title: "Payment approved",
+        description: "Prava approved the payment. Merchant confirmation is pending.",
+        duration: 5000,
+      });
+    }
 
     if (paymentSuccessTimerRef.current) {
       clearTimeout(paymentSuccessTimerRef.current);
     }
 
-    paymentSuccessTimerRef.current = setTimeout(() => {
-      setPaymentSuccessOpen(false);
-    }, 1200);
+    if (status === "paid") {
+      paymentSuccessTimerRef.current = setTimeout(() => {
+        setPaymentSuccessOpen(false);
+      }, 1200);
+    }
   };
 
   const refreshCheckouts = async () => {
@@ -338,6 +363,8 @@ export default function OpenCommerceLens() {
     setPendingPurchase(null);
     setApprovalOpen(false);
     setApprovalStatus("idle");
+    setApprovalError("");
+    setPaymentSuccessOpen(false);
     approvalHandledRef.current.clear();
     paidHandledRef.current.clear();
 
@@ -353,6 +380,11 @@ export default function OpenCommerceLens() {
       setSavedProducts(Array.isArray(nextSaved) ? nextSaved : []);
       const nextCheckouts = Array.isArray(checkoutResponse?.checkouts) ? checkoutResponse.checkouts : [];
       const normalizedCheckouts = nextCheckouts.map((checkout) => ({ ...checkout, status: checkoutApi.normalizeCheckoutStatus(checkout.status) }));
+      normalizedCheckouts.forEach((checkout) => {
+        if (!checkout?.id) return;
+        approvalHandledRef.current.add(checkout.id);
+        paidHandledRef.current.add(checkout.id);
+      });
       setCheckouts(normalizedCheckouts);
       setActiveCheckout(normalizedCheckouts.find((checkout) => checkoutApi.ACTIVE_CHECKOUT_STATUSES.has(checkout.status)) || null);
     };
@@ -497,6 +529,13 @@ export default function OpenCommerceLens() {
 
     setSelectedProductIds((current) => {
       const exists = current.includes(id);
+      if (!exists && current.length >= 5) {
+        toast({
+          title: "Fitting dock is full",
+          description: "Virtual try-on supports up to five garments at a time.",
+        });
+        return current;
+      }
       const next = exists ? current.filter((item) => item !== id) : [...current, id];
       const nextPrimary = next[0] ? visible.find((item) => getProductKey(item) === next[0]) : null;
       setSelected(nextPrimary || null);
@@ -920,13 +959,17 @@ export default function OpenCommerceLens() {
     setJobs((current) => current.map((item) => (item.id === jobId ? { ...item, ...patch } : item)));
   };
 
-  const runTryOn = async (nextProduct, selfieId, placeholderId) => {
+  const runTryOn = async (nextProducts, selfie, placeholderId) => {
+    const productList = (Array.isArray(nextProducts) ? nextProducts : [nextProducts]).filter(Boolean);
+    const requestProduct = productList.length === 1 ? productList[0] : productList;
     let activeJobId = placeholderId;
     try {
-      const job = await api.startTryOn(nextProduct, { userId, selfieId });
+      const selfieId = selfie?.id || selfie?.selfieId;
+      const job = await api.startTryOn(requestProduct, { userId, selfieId, selfie });
       activeJobId = job.id;
+      setActiveTryOnId(job.id);
       setJobs((current) => [
-        { ...job, product: nextProduct },
+        { ...job, product: requestProduct, products: productList, selfie },
         ...current.filter((item) => item.id !== placeholderId && item.id !== job.id),
       ]);
 
@@ -935,12 +978,13 @@ export default function OpenCommerceLens() {
       await api.pollTryOnStatus(job, {
         userId,
         signal: controller.signal,
-        onUpdate: (next) => updateTryOnJob(job.id, { ...next, product: nextProduct }),
+        onUpdate: (next) => updateTryOnJob(job.id, { ...next, product: requestProduct, products: productList, selfie }),
       });
     } catch (error) {
       if (error?.name === "AbortError") return;
       updateTryOnJob(activeJobId, {
         status: "failed",
+        stage: "failed",
         errorMessage: error instanceof Error ? error.message : "Try-on failed",
       });
     } finally {
@@ -949,55 +993,102 @@ export default function OpenCommerceLens() {
   };
 
   const startTry = async (product) => {
-    const nextProduct = product || primarySelected || selected || products[0];
-    setSelected(nextProduct);
+    const nextProducts = (Array.isArray(product)
+      ? product
+      : product
+        ? [product]
+        : selectedProducts.length
+          ? selectedProducts
+          : [primarySelected || selected || products[0]]
+    ).filter(Boolean).slice(0, 5);
+    if (!nextProducts.length) return;
+
+    const signature = nextProducts.map(getProductKey).filter(Boolean).sort().join("|");
+    const duplicate = jobs.find((job) => {
+      if (["completed", "failed", "needs_selfie"].includes(job.status)) return false;
+      const ids = (job.productIds?.length ? job.productIds : jobProductsForSignature(job)).filter(Boolean).sort().join("|");
+      return ids === signature;
+    });
+    if (duplicate) {
+      setActiveTryOnId(duplicate.id);
+      setMode("tryon");
+      return;
+    }
+
+    setSelected(nextProducts[0]);
     setMode("tryon");
     const placeholderId = randomId("tryon");
-    setJobs((current) => [{ id: placeholderId, product: nextProduct, status: "starting" }, ...current]);
+    setActiveTryOnId(placeholderId);
+    setJobs((current) => [{
+      id: placeholderId,
+      product: nextProducts.length === 1 ? nextProducts[0] : nextProducts,
+      products: nextProducts,
+      productIds: nextProducts.map(getProductKey).filter(Boolean),
+      status: "starting",
+      stage: "queued",
+      currentStep: 0,
+      totalSteps: nextProducts.length,
+    }, ...current]);
 
     try {
       const selfies = await api.listTryOnSelfies({ userId });
-      const selfie = selfies.find((item) => item.isDefault) || selfies[0];
+      let selfie = selfies.find((item) => item.isDefault) || selfies[0];
       if (!selfie) {
         updateTryOnJob(placeholderId, { status: "needs_selfie" });
         return;
       }
       if (selfie.status === "failed") {
-        updateTryOnJob(placeholderId, { status: "needs_selfie", errorMessage: selfie.errorMessage });
+        updateTryOnJob(placeholderId, { status: "needs_selfie", selfie, errorMessage: selfie.errorMessage });
         return;
       }
       if (selfie.status === "processing") {
-        updateTryOnJob(placeholderId, { status: "selfie_processing" });
-        await api.waitForSelfie(selfie.id, { userId });
+        updateTryOnJob(placeholderId, { status: "selfie_processing", selfie });
+        selfie = await api.waitForSelfie(selfie.id, { userId });
       }
-      await runTryOn(nextProduct, selfie.id, placeholderId);
+      await runTryOn(nextProducts, selfie, placeholderId);
     } catch (error) {
       updateTryOnJob(placeholderId, {
         status: "failed",
+        stage: "failed",
         errorMessage: error instanceof Error ? error.message : "Unable to start try-on",
       });
     }
   };
 
   const uploadTryOnSelfie = async (file) => {
-    const nextProduct = selected || primarySelected || products[0];
-    const existing = jobs.find((job) => job.product === nextProduct && ["needs_selfie", "failed"].includes(job.status));
+    const currentJob = jobs.find((job) => job.id === activeTryOnId);
+    const nextProducts = currentJob?.products?.length
+      ? currentJob.products
+      : selectedProducts.length
+        ? selectedProducts
+        : [selected || primarySelected || products[0]].filter(Boolean);
+    const existing = currentJob && ["needs_selfie", "failed"].includes(currentJob.status) ? currentJob : null;
     const placeholderId = existing?.id || randomId("tryon");
     if (!existing) {
-      setJobs((current) => [{ id: placeholderId, product: nextProduct, status: "selfie_processing" }, ...current]);
+      setActiveTryOnId(placeholderId);
+      setJobs((current) => [{
+        id: placeholderId,
+        product: nextProducts.length === 1 ? nextProducts[0] : nextProducts,
+        products: nextProducts,
+        productIds: nextProducts.map(getProductKey).filter(Boolean),
+        status: "selfie_processing",
+        totalSteps: nextProducts.length,
+      }, ...current]);
     } else {
       updateTryOnJob(placeholderId, { status: "selfie_processing", errorMessage: null });
     }
 
     try {
-      const selfie = await api.uploadTryOnSelfie(file, { userId });
+      let selfie = await api.uploadTryOnSelfie(file, { userId });
+      updateTryOnJob(placeholderId, { selfie });
       if (selfie.status === "processing") {
-        await api.waitForSelfie(selfie.selfieId, { userId });
+        selfie = await api.waitForSelfie(selfie.selfieId, { userId });
       }
-      await runTryOn(nextProduct, selfie.selfieId, placeholderId);
+      await runTryOn(nextProducts, selfie, placeholderId);
     } catch (error) {
       updateTryOnJob(placeholderId, {
         status: "failed",
+        stage: "failed",
         errorMessage: error instanceof Error ? error.message : "Selfie upload failed",
       });
     }
@@ -1031,6 +1122,22 @@ export default function OpenCommerceLens() {
       next[index] = { ...next[index], ...normalized };
       return next;
     });
+  };
+
+  const removeSelectedProduct = (product) => {
+    const id = getProductKey(product);
+    if (!id) return;
+    setSelectedProductIds((current) => {
+      const next = current.filter((item) => item !== id);
+      const nextPrimary = next[0] ? visible.find((item) => getProductKey(item) === next[0]) : null;
+      setSelected(nextPrimary || null);
+      return next;
+    });
+  };
+
+  const clearSelectedProducts = () => {
+    setSelectedProductIds([]);
+    setSelected(null);
   };
 
   const handleCheckoutTransition = async (checkout) => {
@@ -1237,6 +1344,26 @@ export default function OpenCommerceLens() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!userId) {
+      setJobs([]);
+      setActiveTryOnId(null);
+      return undefined;
+    }
+
+    setJobs([]);
+    setActiveTryOnId(null);
+    const controller = new AbortController();
+    api.listTryOnJobs({ userId, limit: 20, signal: controller.signal })
+      .then((history) => {
+        setJobs(history);
+      })
+      .catch((error) => {
+        if (error?.name !== "AbortError") console.error("Try-on history load failed:", error);
+      });
+    return () => controller.abort();
+  }, [userId]);
+
   const nav = (nextMode) => {
     if (nextMode === "discover") {
       setMode("discover");
@@ -1258,7 +1385,10 @@ export default function OpenCommerceLens() {
         onAddToCart={handleAddToCart}
         onToggleSaved={handleToggleSaved}
         onCompare={openComparison}
-        onView={() => setMode("product")}
+        onView={(product) => {
+          if (product) setSelected(product);
+          setMode("product");
+        }}
         loading={mode === "searching" || resultsLoading}
         reference={reference}
         filters={filters}
@@ -1267,6 +1397,9 @@ export default function OpenCommerceLens() {
         onCycleSort={cycleSort}
         cartProductIds={cartProductIds}
         savedProductIds={savedProductIds}
+        activeTryOn={dockActiveTryOn}
+        onRemoveSelected={removeSelectedProduct}
+        onClearSelected={clearSelectedProducts}
       />
     ) : mode === "product" ? (
       <ProductDetail
@@ -1284,10 +1417,15 @@ export default function OpenCommerceLens() {
     ) : mode === "tryon" ? (
       <TryOnStudio
         product={selected || products[0]}
+        products={selectedProducts}
         jobs={jobs}
+        activeJobId={activeTryOnId}
+        onSelectJob={setActiveTryOnId}
         onMode={setMode}
         onUploadSelfie={uploadTryOnSelfie}
         onRetry={startTry}
+        onSaveLook={(items) => Promise.all(items.map(handleSaveProduct))}
+        onAddToCart={(items) => Promise.all(items.map((item) => handleAddToCart(item)))}
       />
     ) : mode === "checkout" ? (
       <Checkout

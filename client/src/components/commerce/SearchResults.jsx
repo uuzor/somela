@@ -26,6 +26,9 @@ export default function SearchResults({
   onCycleSort,
   cartProductIds = [],
   savedProductIds = [],
+  activeTryOn,
+  onRemoveSelected,
+  onClearSelected,
 }) {
   const activeSelectedIds = Array.isArray(selectedIds) && selectedIds.length > 0
     ? selectedIds.filter(Boolean)
@@ -68,7 +71,7 @@ export default function SearchResults({
           onCycleSort={onCycleSort}
         />
       </div>
-      <div className="flex-1 overflow-y-auto px-4 grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 content-start">
+      <div className="flex-1  overflow-y-scroll px-4 grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 content-start">
         {loading ? (
           Array.from({ length: 8 }).map((_, i) => (
             <ProductCard key={`loading-${i}`} loading />
@@ -101,9 +104,13 @@ export default function SearchResults({
       </div>
       <SelectedProductTray
         product={primarySelected}
+        products={resolvedSelectedProducts}
+        activeTryOn={activeTryOn}
+        onRemove={onRemoveSelected}
+        onClear={onClearSelected}
         onCompare={() => onCompare?.(resolvedSelectedProducts.length > 0 ? resolvedSelectedProducts : primarySelected ? [primarySelected] : [])}
-        onTry={() => onTry(primarySelected)}
-        onView={() => onView(primarySelected)}
+        onTry={(items) => onTry(items.length === 1 ? items[0] : items)}
+        onView={(item) => onView(item || primarySelected)}
       />
     </div>
   );

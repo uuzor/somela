@@ -12,13 +12,14 @@ import {
   verifyWebhookSignature,
   type YouCamWebhookPayload,
 } from "../services/youcam.js";
-import { getOwnedTryOnTask, saveTryOnResult, startTryOnJob } from "../services/tryon.js";
+import { getOwnedTryOnTask, listOwnedTryOnTasks, saveTryOnResult, startTryOnJob } from "../services/tryon.js";
 
 export const tryonRouter = Router();
 
 const TryOnInputSchema = z.object({
-  productIds: z.array(z.string().min(1)).min(1).max(5),
+  productIds: z.array(z.string().min(1)).length(1),
   selfieId: z.string().uuid().optional(),
+  parentTaskId: z.string().uuid().optional(),
 });
 
 function sendError(res: any, error: unknown, fallback: string) {
@@ -44,7 +45,19 @@ function serializeTask(task: any) {
   return {
     taskId: task.id,
     status: task.status,
+    stage: task.stage || "queued",
+    currentStep: task.currentStep || 0,
+    totalSteps: task.totalSteps || Math.max(task.productIds?.length || 1, 1),
+    currentProductId: task.currentProductId || null,
     productIds: task.productIds || [],
+    products: task.products || [],
+    outfitProducts: task.outfitProducts || [],
+    parentTaskId: task.parentTaskId || null,
+    sourceImageUrl: task.sourceImageUrl || null,
+    garmentSlot: task.garmentSlot || null,
+    outfitState: task.outfitState || {},
+    selfieId: task.selfieId || null,
+    userSelfieUrl: task.userSelfieUrl || null,
     resultImageUrl: task.resultImageUrl || null,
     errorMessage: task.errorMessage || null,
     externalTaskId: task.externalTaskId || null,
@@ -65,6 +78,7 @@ tryonRouter.post("/", tryonRateLimit, async (req, res) => {
       sessionId: identity.sessionId,
       productIds: input.productIds,
       selfieId: input.selfieId,
+      parentTaskId: input.parentTaskId,
     });
     return res.status(202).json(serializeTask(task));
   } catch (error) {
@@ -74,23 +88,9 @@ tryonRouter.post("/", tryonRateLimit, async (req, res) => {
 });
 
 tryonRouter.post("/multi", tryonRateLimit, async (req, res) => {
-  try {
-    if (!isYouCamConfigured()) {
-      return res.status(503).json({ error: "Try-on not available", reason: "YOUCAM_API_KEY not configured" });
-    }
-    const input = TryOnInputSchema.parse(req.body);
-    const identity = await authenticatedUser(req);
-    const task = await startTryOnJob({
-      userId: identity.userId,
-      sessionId: identity.sessionId,
-      productIds: input.productIds,
-      selfieId: input.selfieId,
-    });
-    return res.status(202).json(serializeTask(task));
-  } catch (error) {
-    console.error("Multi try-on start error:", error);
-    return sendError(res, error, "Failed to initiate multi-product try-on");
-  }
+  return res.status(410).json({
+    error: "Batch try-on has been replaced by incremental try-on. Apply one product to the current look at a time.",
+  });
 });
 
 tryonRouter.post("/selfie", tryonRateLimit, async (req, res) => {
@@ -149,6 +149,18 @@ tryonRouter.get("/selfies", async (req, res) => {
   }
 });
 
+tryonRouter.get("/history", async (req, res) => {
+  try {
+    const identity = await authenticatedUser(req);
+    const limit = z.coerce.number().int().min(1).max(50).default(20).parse(req.query.limit);
+    const tasks = await listOwnedTryOnTasks(identity.userId, limit);
+    return res.json({ jobs: tasks.map(serializeTask) });
+  } catch (error) {
+    console.error("Try-on history error:", error);
+    return sendError(res, error, "Failed to list try-on history");
+  }
+});
+
 tryonRouter.post("/webhook", async (req, res) => {
   try {
     const rawBody = (req as any).rawBody;
@@ -173,6 +185,9 @@ tryonRouter.post("/webhook", async (req, res) => {
         const resultImageUrl = await saveTryOnResult(remoteUrl, task.id, 1);
         await db.update(tryonTasks).set({
           status: "completed",
+          stage: "completed",
+          currentStep: task.totalSteps || 1,
+          currentProductId: null,
           resultImageUrl,
           errorMessage: null,
           completedAt: new Date(),
@@ -182,6 +197,7 @@ tryonRouter.post("/webhook", async (req, res) => {
     } else if (payload.task_status === "error") {
       await db.update(tryonTasks).set({
         status: "failed",
+        stage: "failed",
         errorMessage: payload.error?.message || "YouCam processing failed",
         completedAt: new Date(),
         updatedAt: new Date(),

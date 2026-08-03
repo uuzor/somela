@@ -373,36 +373,21 @@ export async function processSelfie(
   selfieId: string,
   imageUrl: string,
   userId: string,
-  apiKey: string
+  _apiKey: string
 ): Promise<string | null> {
   await db
     .update(userSelfies)
-    .set({ status: "processing", errorMessage: null })
+    .set({
+      processedImageUrl: imageUrl,
+      status: "completed",
+      errorMessage: null,
+    })
     .where(and(eq(userSelfies.id, selfieId), eq(userSelfies.userId, userId)));
 
-  console.log(`Processing selfie ${selfieId} for user ${userId}`);
-  const processedUrl = await processImage(imageUrl, apiKey);
-
-  if (processedUrl) {
-    await db
-      .update(userSelfies)
-      .set({
-        processedImageUrl: processedUrl,
-        status: "completed",
-        errorMessage: null,
-      })
-      .where(and(eq(userSelfies.id, selfieId), eq(userSelfies.userId, userId)));
-
-    console.log(`Selfie ${selfieId} processed, stored at: ${processedUrl}`);
-  } else {
-    await db
-      .update(userSelfies)
-      .set({ status: "failed", errorMessage: "Selfie preparation failed" })
-      .where(and(eq(userSelfies.id, selfieId), eq(userSelfies.userId, userId)));
-    console.error(`Selfie ${selfieId} processing failed`);
-  }
-
-  return processedUrl;
+  // AI Clothes v3 accepts a public src_file_url directly. Selfie background
+  // removal changes the source person and adds two unnecessary failure points.
+  console.log(`Selfie ${selfieId} ready for direct URL try-on for user ${userId}`);
+  return imageUrl;
 }
 
 // ============================================================================

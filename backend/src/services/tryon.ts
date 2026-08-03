@@ -53,10 +53,18 @@ async function resolveSelfie(userId: string, selfieId?: string) {
   return selfie;
 }
 
-async function processTryOnTask(taskId: string, selfie: any, productRecords: any[]) {
+async function processTryOnTask(taskId: string, sourceImageUrl: string, productRecords: any[]) {
   try {
     const apiKey = getYouCamApiKey();
-    let sourceImage = selfie.processedImageUrl || selfie.imageUrl;
+    let sourceImage = sourceImageUrl;
+
+    await db.update(tryonTasks).set({
+      status: "processing",
+      stage: "preparing",
+      currentStep: 0,
+      totalSteps: productRecords.length,
+      updatedAt: new Date(),
+    }).where(eq(tryonTasks.id, taskId));
 
     for (let index = 0; index < productRecords.length; index += 1) {
       const product = productRecords[index];
@@ -72,6 +80,9 @@ async function processTryOnTask(taskId: string, selfie: any, productRecords: any
       await db.update(tryonTasks).set({
         externalTaskId: externalTask.task_id,
         garmentImageUrl: garmentImage,
+        stage: "applying_garment",
+        currentStep: index + 1,
+        currentProductId: product.id,
         updatedAt: new Date(),
       }).where(eq(tryonTasks.id, taskId));
 
@@ -86,6 +97,9 @@ async function processTryOnTask(taskId: string, selfie: any, productRecords: any
 
     await db.update(tryonTasks).set({
       status: "completed",
+      stage: "completed",
+      currentStep: productRecords.length,
+      currentProductId: null,
       resultImageUrl: sourceImage,
       errorMessage: null,
       completedAt: new Date(),
@@ -95,6 +109,7 @@ async function processTryOnTask(taskId: string, selfie: any, productRecords: any
     const message = error instanceof Error ? error.message : String(error);
     await db.update(tryonTasks).set({
       status: "failed",
+      stage: "failed",
       errorMessage: message,
       completedAt: new Date(),
       updatedAt: new Date(),
@@ -108,13 +123,24 @@ export async function startTryOnJob(input: {
   productIds: string[];
   selfieId?: string;
   sessionId?: string | null;
+  parentTaskId?: string;
 }) {
   const productIds = [...new Set(input.productIds.filter(Boolean))];
-  if (productIds.length === 0 || productIds.length > 5) {
-    fail("Try-on requires between one and five products.", 400);
+  if (productIds.length !== 1) {
+    fail("Incremental try-on accepts exactly one product at a time.", 400);
   }
 
-  const selfie = await resolveSelfie(input.userId, input.selfieId);
+  const parentTask = input.parentTaskId
+    ? await getOwnedTryOnTask(input.userId, input.parentTaskId)
+    : null;
+  if (input.parentTaskId && !parentTask) fail("Previous try-on state was not found.", 404);
+  if (parentTask && parentTask.status !== "completed") fail("Previous try-on state is not ready.", 409);
+  if (parentTask && !parentTask.resultImageUrl) fail("Previous try-on state has no result image.", 409);
+
+  const selfie = parentTask
+    ? await resolveSelfie(input.userId, parentTask.selfieId || undefined)
+    : await resolveSelfie(input.userId, input.selfieId);
+  const sourceImageUrl = parentTask?.resultImageUrl || selfie.processedImageUrl || selfie.imageUrl;
   const productRows = await Promise.all(
     productIds.map((id) => db.select(productSummarySelect).from(products).where(eq(products.id, id)).limit(1)),
   );
@@ -123,19 +149,31 @@ export async function startTryOnJob(input: {
   if (productRecords.some((product) => !(product.processedImages?.[0] || product.images?.[0]))) {
     fail("One or more products do not have a garment image.", 400);
   }
+  const garmentSlot = detectGarmentCategory(productRecords[0]);
+  const outfitState = {
+    ...((parentTask?.outfitState as Record<string, string> | null) || {}),
+    [garmentSlot]: productIds[0],
+  };
 
   const [task] = await db.insert(tryonTasks).values({
     userId: input.userId,
     sessionId: input.sessionId || null,
     productId: productIds[0],
     productIds,
+    parentTaskId: parentTask?.id || null,
+    sourceImageUrl,
+    garmentSlot,
+    outfitState,
     selfieId: selfie.id,
-    userSelfieUrl: selfie.processedImageUrl || selfie.imageUrl,
+    userSelfieUrl: sourceImageUrl,
     garmentImageUrl: productRecords[0].processedImages?.[0] || productRecords[0].images?.[0] || null,
     status: "processing",
+    stage: "queued",
+    currentStep: 0,
+    totalSteps: productIds.length,
   }).returning();
 
-  void processTryOnTask(task.id, selfie, productRecords).catch((error) => {
+  void processTryOnTask(task.id, sourceImageUrl, productRecords).catch((error) => {
     console.error("Try-on background job failed:", error);
   });
 
@@ -147,4 +185,24 @@ export async function getOwnedTryOnTask(userId: string, taskId: string) {
     .where(and(eq(tryonTasks.id, taskId), eq(tryonTasks.userId, userId)))
     .limit(1);
   return task || null;
+}
+
+export async function listOwnedTryOnTasks(userId: string, limit = 20) {
+  const tasks = await db.select().from(tryonTasks)
+    .where(eq(tryonTasks.userId, userId))
+    .orderBy(desc(tryonTasks.createdAt))
+    .limit(Math.min(Math.max(limit, 1), 50));
+  return Promise.all(tasks.map(async (task) => {
+    const ids = [...new Set([
+      ...(Array.isArray(task.productIds) ? task.productIds : []),
+      ...Object.values((task.outfitState as Record<string, string> | null) || {}),
+    ])];
+    const rows = await Promise.all(ids.map((id) => db.select(productSummarySelect).from(products).where(eq(products.id, id)).limit(1)));
+    const resolvedProducts = rows.map((result) => result[0]).filter(Boolean);
+    return {
+      ...task,
+      products: resolvedProducts.filter((product) => task.productIds?.includes(product.id)),
+      outfitProducts: resolvedProducts.filter((product) => Object.values(task.outfitState || {}).includes(product.id)),
+    };
+  }));
 }

@@ -17,6 +17,7 @@ export default defineConfig({
       'pompously-prettied-malena.ngrok-free.dev',
       'pompously-prettied-malena.ngrok-free.dev',
       '.ngrok-free.dev',
+      "https://opencommercelens-backend.vercel.app/",
       '.loca.lt',
     ],
   },

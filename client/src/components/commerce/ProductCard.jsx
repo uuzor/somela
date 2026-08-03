@@ -83,7 +83,7 @@ export default function ProductCard({ product, selected, saved = false, inCart =
   const compareLabel = compareAtPrice != null ? formatMoney(compareAtPrice, product?.currency || "USD") : null;
 
   return (
-    <article className={`group rounded-[16px] overflow-hidden bg-card transition ${selected ? "ring-0 ring-primary" : "shadow-elevated"}`}>
+    <article className={`group rounded-[16px]  bg-card transition ${selected ? "ring-0 ring-primary" : "shadow-elevated"}`}>
       <div className="relative p-2">
         <button
           onClick={onSelect}

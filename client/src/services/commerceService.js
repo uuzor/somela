@@ -209,8 +209,8 @@ export async function getProductDetails(id) {
 
 export async function startTryOn(product, options = {}) {
   const productIds = Array.isArray(product)
-    ? product.map((item) => (typeof item === "string" ? item : item?.id)).filter(Boolean)
-    : [typeof product === "string" ? product : product?.id].filter(Boolean);
+    ? product.map((item) => (typeof item === "string" ? item : getProductId(item))).filter(Boolean)
+    : [typeof product === "string" ? product : getProductId(product)].filter(Boolean);
 
   if (productIds.length === 0) throw new Error("A valid product is required for try-on.");
   const data = await request(productIds.length > 1 ? "/api/tryon/multi" : "/api/tryon", {
@@ -226,6 +226,13 @@ export async function startTryOn(product, options = {}) {
     id: data.taskId || randomId(),
     product: Array.isArray(product) ? product.map(normalizeProduct) : normalizeProduct(product),
     status: data.status || "processing",
+    stage: data.stage || "queued",
+    currentStep: data.currentStep || 0,
+    totalSteps: data.totalSteps || productIds.length,
+    currentProductId: data.currentProductId || null,
+    productIds: data.productIds || productIds,
+    selfieId: data.selfieId || options.selfieId || null,
+    selfie: options.selfie || null,
     externalTaskId: data.externalTaskId,
     resultImageUrl: data.resultImageUrl || null,
     errorMessage: data.errorMessage || null,
@@ -244,7 +251,22 @@ export async function getTryOnStatus(job, options = {}) {
     ...(typeof job === "object" ? job : { id: jobId }),
     ...data,
     id: job?.id || jobId,
+    productIds: data.productIds || job?.productIds || [],
   };
+}
+
+export async function listTryOnJobs(options = {}) {
+  const data = await request("/api/tryon/history", {
+    query: options.limit ? { limit: options.limit } : undefined,
+    headers: userHeaders(options.userId),
+    signal: options.signal,
+  });
+  return (Array.isArray(data?.jobs) ? data.jobs : []).map((job) => ({
+    ...job,
+    id: job.taskId || job.id,
+    productIds: Array.isArray(job.productIds) ? job.productIds : [],
+    products: Array.isArray(job.products) ? job.products.map(normalizeProduct) : [],
+  }));
 }
 
 export async function pollTryOnStatus(job, options = {}) {

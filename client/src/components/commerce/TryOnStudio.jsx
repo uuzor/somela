@@ -1,102 +1,254 @@
-import { ArrowLeft, Heart, ImageUp, Loader2, RefreshCcw, Scale, ShoppingBag } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  Check,
+  Download,
+  Heart,
+  ImageUp,
+  Loader2,
+  RefreshCcw,
+  Scale,
+  ShoppingBag,
+  Sparkles,
+} from "lucide-react";
 import TryOnQueue from "./TryOnQueue";
 
-function productKey(product) {
-  return product?.id || product?.productId || product?.raw?.productId || null;
+function imageFor(product) {
+  return product?.primaryImage || product?.image || product?.images?.[0] || "";
 }
 
-export default function TryOnStudio({ product, jobs = [], onMode, onUploadSelfie, onRetry }) {
-  const key = productKey(product);
-  const currentJob = jobs.find((job) => productKey(job.product) === key) || jobs[0] || null;
+function nameFor(product) {
+  return product?.name || product?.title || "Selected garment";
+}
+
+function jobProducts(job, fallback) {
+  if (job?.products?.length) return job.products;
+  if (Array.isArray(job?.product)) return job.product;
+  if (job?.product) return [job.product];
+  return Array.isArray(fallback) ? fallback.filter(Boolean) : [fallback].filter(Boolean);
+}
+
+function stageLabel(job) {
+  if (job?.stage === "preparing" || job?.status === "selfie_processing") return "Preparing your photo";
+  if (job?.stage === "applying_garment") {
+    return `Applying garment ${Math.max(job.currentStep || 1, 1)} of ${Math.max(job.totalSteps || 1, 1)}`;
+  }
+  if (job?.stage === "finalizing") return "Finishing your look";
+  return "Starting virtual try-on";
+}
+
+export default function TryOnStudio({
+  product,
+  products,
+  jobs = [],
+  activeJobId,
+  onSelectJob,
+  onMode,
+  onUploadSelfie,
+  onRetry,
+  onSaveLook,
+  onAddToCart,
+}) {
+  const inputRef = useRef(null);
+  const [preview, setPreview] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [view, setView] = useState("result");
+  const currentJob = jobs.find((job) => job.id === activeJobId) || jobs[0] || null;
+  const selectedProducts = jobProducts(currentJob, products?.length ? products : product);
+  const primaryProduct = selectedProducts[0] || product || null;
   const ready = currentJob?.status === "completed";
-  const needsSelfie = currentJob?.status === "needs_selfie";
   const failed = currentJob?.status === "failed";
-  const selfieProcessing = currentJob?.status === "selfie_processing";
-  const processing = ["starting", "pending", "processing", "queued"].includes(currentJob?.status);
-  const sourceImage = product?.image || product?.primaryImage || product?.images?.[0] || "";
-  const resultImage = ready && currentJob?.resultImageUrl ? currentJob.resultImageUrl : sourceImage;
-  const title = product?.name || product?.title || "Selected garment";
-  const price = product?.displayPrice || product?.price || product?.minPrice || "";
+  const needsSelfie = !currentJob || currentJob.status === "needs_selfie";
+  const selfieImage = currentJob?.selfie?.processedImageUrl || currentJob?.selfie?.imageUrl || currentJob?.userSelfieUrl || "";
+  const resultImage = currentJob?.resultImageUrl || "";
+  const phase = preview ? "prepare" : ready ? "review" : needsSelfie || failed ? "prepare" : "generate";
+
+  useEffect(() => () => {
+    if (preview?.url) URL.revokeObjectURL(preview.url);
+  }, [preview]);
+
+  const chooseFile = (file) => {
+    if (!file) return;
+    setPreview((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return { file, url: URL.createObjectURL(file) };
+    });
+  };
+
+  const confirmSelfie = async () => {
+    if (!preview?.file || uploading) return;
+    setUploading(true);
+    try {
+      await onUploadSelfie?.(preview.file);
+      setPreview(null);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const downloadResult = async () => {
+    if (!resultImage) return;
+    const link = document.createElement("a");
+    link.href = resultImage;
+    link.download = "opencommercelens-try-on.jpg";
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.click();
+  };
 
   return (
     <div className="h-full flex flex-col p-5 overflow-y-auto">
-      <div>
-        <h1 className="text-2xl font-semibold">Virtual try-on</h1>
-        <p className="text-xs text-muted-foreground">{title} ? {product?.color || "Selected colour"} ? {product?.size || "Selected size"}</p>
-      </div>
-
-      <div className="flex-1 grid lg:grid-cols-[1fr_1fr_200px] gap-3 mt-4 min-h-0">
-        <div className="relative">
-          <img src={sourceImage} alt="Original outfit" className="w-full h-full min-h-64 object-cover rounded-[20px]" />
-          <span className="badge absolute top-3 left-3 bg-card">Original</span>
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            {phase === "prepare" ? "Prepare" : phase === "generate" ? "Generating" : "Review"}
+          </p>
+          <h1 className="text-2xl font-semibold">Virtual try-on</h1>
+          <p className="text-xs text-muted-foreground">
+            {selectedProducts.length > 1 ? `${selectedProducts.length} piece outfit` : nameFor(primaryProduct)}
+          </p>
         </div>
+        <button type="button" onClick={() => onMode?.("results")} className="control"><ArrowLeft size={15} />Results</button>
+      </header>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        className="hidden"
+        onChange={(event) => {
+          chooseFile(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
 
-        <div className="relative">
-          <img
-            src={resultImage}
-            alt={ready ? "Generated virtual try-on" : "Try-on processing preview"}
-            className={"w-full h-full min-h-64 object-cover rounded-[20px] " + (ready ? "" : "opacity-40")}
-          />
-          <span className="badge absolute top-3 left-3 bg-card">
-            {ready ? "Try-on" : failed ? "Failed" : needsSelfie ? "Selfie required" : selfieProcessing ? "Preparing selfie..." : "Processing..."}
-          </span>
-          {(processing || selfieProcessing) && (
-            <div className="absolute inset-0 grid place-items-center">
-              <Loader2 className="animate-spin text-primary" size={28} />
-            </div>
-          )}
-        </div>
-
-        <aside className="panel p-4">
-          <img src={sourceImage} alt="Selected garment" className="w-16 h-16 object-cover rounded-xl float-left mr-2" />
-          <p className="text-xs font-medium">{title}</p>
-          <p className="text-xs text-muted-foreground">{typeof price === "number" ? "$" + price : price}</p>
-
-          <div className="clear-both pt-4">
-            <p className="label">Colour: {product?.color || "Selected"}</p>
-            <div className="flex gap-2">
-              <span className="swatch bg-black ring-2 ring-primary" />
-              <span className="swatch bg-amber-800" />
-            </div>
-            <p className="label">Size: {product?.size || "Selected"}</p>
-            <button className="control"><Heart size={14} />Save look</button>
-
-            {(needsSelfie || failed) && (
-              <div className="mt-3 space-y-2">
-                {currentJob?.errorMessage && <p className="text-[10px] text-destructive">{currentJob.errorMessage}</p>}
-                <label className="control cursor-pointer">
-                  <ImageUp size={14} />
-                  Upload selfie
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) onUploadSelfie?.(file);
-                      event.target.value = "";
-                    }}
-                  />
-                </label>
-                {failed && (
-                  <button type="button" onClick={() => onRetry?.(product)} className="control">
-                    <RefreshCcw size={14} />Retry
+      {phase === "prepare" && (
+        <div className="flex-1 grid lg:grid-cols-[minmax(0,1fr)_280px] gap-4 mt-4">
+          <section className="panel p-5 grid place-items-center min-h-[420px]">
+            {preview ? (
+              <div className="w-full h-full flex flex-col items-center justify-center gap-4">
+                <img src={preview.url} alt="Selected selfie preview" className="max-h-[460px] w-full object-contain rounded-[20px] bg-muted" />
+                <div className="flex flex-wrap justify-center gap-2">
+                  <button type="button" onClick={() => inputRef.current?.click()} className="control">Choose another</button>
+                  <button type="button" onClick={confirmSelfie} className="primary" disabled={uploading}>
+                    {uploading ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
+                    Use this photo
                   </button>
-                )}
+                </div>
+              </div>
+            ) : (
+              <div className="max-w-sm text-center">
+                <div className="w-16 h-16 rounded-full bg-muted grid place-items-center mx-auto mb-4"><ImageUp size={24} /></div>
+                <h2 className="text-lg font-medium">Add a clear full-body photo</h2>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Face the camera, keep your arms slightly away from your body, and use an uncluttered, well-lit background.
+                </p>
+                {currentJob?.errorMessage && <p className="text-xs text-destructive mt-3">{currentJob.errorMessage}</p>}
+                <button type="button" onClick={() => inputRef.current?.click()} className="primary mt-5"><ImageUp size={15} />Choose photo</button>
               </div>
             )}
+          </section>
+          <GarmentStack products={selectedProducts} />
+        </div>
+      )}
 
-            <TryOnQueue jobs={jobs} />
+      {phase === "generate" && (
+        <div className="flex-1 grid lg:grid-cols-[minmax(0,1fr)_280px] gap-4 mt-4">
+          <section className="panel relative min-h-[460px] overflow-hidden grid place-items-center">
+            {selfieImage ? (
+              <img src={selfieImage} alt="Your try-on photo" className="w-full h-full max-h-[620px] object-contain bg-muted/40 opacity-60" />
+            ) : (
+              <div className="w-full h-full bg-muted/40" />
+            )}
+            <div className="absolute inset-0 grid place-items-center bg-background/20">
+              <div className="panel px-5 py-4 text-center shadow-card">
+                <Loader2 className="animate-spin mx-auto text-primary" size={28} />
+                <p className="text-sm font-medium mt-3">{stageLabel(currentJob)}</p>
+                <p className="text-[10px] text-muted-foreground mt-1">You can leave this screen. The look will stay in Recent looks.</p>
+              </div>
+            </div>
+          </section>
+          <aside>
+            <GarmentStack products={selectedProducts} />
+            <TryOnQueue jobs={jobs} activeJobId={currentJob?.id} onSelect={onSelectJob} />
+          </aside>
+        </div>
+      )}
+
+      {phase === "review" && (
+        <>
+          <div className="flex flex-wrap gap-2 mt-4" role="tablist" aria-label="Try-on view">
+            {["result", "before", "side-by-side"].map((option) => (
+              <button
+                key={option}
+                type="button"
+                role="tab"
+                aria-selected={view === option}
+                onClick={() => setView(option)}
+                className={view === option ? "primary" : "control"}
+              >
+                {option === "side-by-side" ? "Side by side" : option === "before" ? "Original" : "Result"}
+              </button>
+            ))}
           </div>
-        </aside>
-      </div>
+          <div className={"flex-1 grid gap-3 mt-3 min-h-[460px] " + (view === "side-by-side" ? "md:grid-cols-2" : "grid-cols-1")}>
+            {(view === "before" || view === "side-by-side") && (
+              <figure className="panel relative overflow-hidden">
+                <img src={selfieImage} alt="Original selfie" className="w-full h-full max-h-[640px] object-contain bg-muted/30" />
+                <figcaption className="badge absolute top-3 left-3 bg-card">Original</figcaption>
+              </figure>
+            )}
+            {(view === "result" || view === "side-by-side") && (
+              <figure className="panel relative overflow-hidden">
+                <img src={resultImage} alt="Generated virtual try-on" className="w-full h-full max-h-[640px] object-contain bg-muted/30" />
+                <figcaption className="badge absolute top-3 left-3 bg-card">Your look</figcaption>
+              </figure>
+            )}
+          </div>
+          <div className="panel p-3 mt-4 flex flex-wrap gap-2 items-center">
+            <button type="button" onClick={() => onRetry?.(selectedProducts.length === 1 ? primaryProduct : selectedProducts)} className="control">
+              <RefreshCcw size={15} />Try again
+            </button>
+            <button type="button" onClick={() => onSaveLook?.(selectedProducts)} className="control"><Heart size={15} />Save pieces</button>
+            <button type="button" onClick={downloadResult} className="control"><Download size={15} />Download</button>
+            <button type="button" onClick={() => onAddToCart?.(selectedProducts)} className="primary ml-auto"><ShoppingBag size={15} />Add look to cart</button>
+          </div>
+          <TryOnQueue jobs={jobs} activeJobId={currentJob?.id} onSelect={onSelectJob} />
+        </>
+      )}
 
-      <p className="text-[10px] text-muted-foreground mt-2">Virtual preview - confirm the merchant&apos;s size guide before purchase.</p>
-      <div className="panel p-3 mt-4 flex gap-2 items-center">
-        <button onClick={() => onMode("results")} className="control"><ArrowLeft size={15} />Back to results</button>
-        <button onClick={() => onMode("comparison")} className="control"><Scale size={15} />Compare another</button>
-        <button onClick={() => onMode("checkout")} className="primary ml-auto"><ShoppingBag size={15} />Continue to checkout</button>
-      </div>
+      {phase !== "review" && (
+        <div className="panel p-3 mt-4 flex flex-wrap gap-2 items-center">
+          <button type="button" onClick={() => onMode?.("comparison")} className="control"><Scale size={15} />Compare another</button>
+          {!needsSelfie && (
+            <button type="button" onClick={() => inputRef.current?.click()} className="control ml-auto"><ImageUp size={15} />Replace selfie</button>
+          )}
+        </div>
+      )}
+
+      <p className="text-[10px] text-muted-foreground mt-2">Virtual preview only. Confirm fit and sizing with the merchant before purchase.</p>
     </div>
+  );
+}
+
+function GarmentStack({ products }) {
+  return (
+    <aside className="panel p-4 h-fit">
+      <div className="flex items-center gap-2 mb-3">
+        <Sparkles size={14} />
+        <h2 className="text-xs font-medium">{products.length > 1 ? "Outfit pieces" : "Selected garment"}</h2>
+      </div>
+      <div className="space-y-3">
+        {products.map((item, index) => (
+          <div key={item.id || item.raw?.productId || index} className="flex gap-2">
+            <img src={imageFor(item)} alt="" className="w-14 h-14 rounded-xl object-cover" />
+            <div className="min-w-0">
+              <p className="text-xs font-medium truncate">{nameFor(item)}</p>
+              <p className="text-[10px] text-muted-foreground">{[item.color, item.size].filter(Boolean).join(" / ") || "Default variant"}</p>
+              <p className="text-[10px]">{item.displayPrice || item.price || (item.minPrice != null ? "$" + item.minPrice : "")}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </aside>
   );
 }
