@@ -3,7 +3,8 @@
 ## Production configuration
 
 Before running `shopify app deploy`, replace the placeholder domain in
-`shopify.app.toml`:
+`shopify.app.toml`, or copy `shopify.app.production.toml.example` to
+`shopify.app.production.toml` and replace every production-domain placeholder:
 
 ```toml
 application_url = "https://your-app-domain.com"
@@ -26,10 +27,19 @@ Set these production secrets on the app host:
 - `VOYAGE_API_KEY`
 - `SHOPIFY_BILLING_TEST=false`
 - `NODE_ENV=production`
+- `PORT`, if the host does not inject one
 
-SQLite is acceptable only for a persistent, single-instance deployment. Move
-the Prisma session and merchant tracker to a managed database before using an
-ephemeral or multi-instance host.
+The Shopify session, merchant, and sync-tracking models use the same managed
+PostgreSQL service as isolated `shopify_app_*` tables. Container startup runs
+the Shopify storage and durable webhook queue migrations before serving.
+
+Verify production readiness after deployment:
+
+1. Request `GET /health` and expect HTTP 200 with database and queue `ready`.
+2. Run `shopify app deploy --config production` after creating the production
+   TOML file.
+3. Install or re-authenticate the development store so its session is written
+   to PostgreSQL.
 
 ## Merchant workflow to test
 
@@ -75,5 +85,6 @@ Do not claim guaranteed traffic, sales, placement, or support by every AI agent.
 
 - `shopify.app.toml` still contains `https://example.com` and no redirect URLs.
 - The in-app documentation/support links still require real OpenCommerceLens public URLs.
-- Production session storage must be confirmed as persistent.
-- A durable background job runner is recommended for large catalogues; the current initial sync assumes a long-lived Node process.
+- A real production hostname is still required in the production TOML.
+- The initial full-catalogue sync still runs in the web process; move full
+  resync jobs into the durable queue before supporting very large catalogues.

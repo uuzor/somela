@@ -1,0 +1,7 @@
+name = "OpenCommerceLens Web"
+roles = ["frontend", "backend"]
+webhooks_path = "/webhooks/app/uninstalled"
+
+[commands]
+predev = "pnpm exec prisma generate && pnpm run migrate:shopify-storage && pnpm run migrate:webhook-queue"
+dev = "pnpm exec react-router dev"

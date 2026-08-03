@@ -6,8 +6,8 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -28,6 +28,9 @@ model Session {
   emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+
+  @@index([shop])
+  @@map("shopify_app_sessions")
 }
 
 // Registered merchant (one per Shopify store)
@@ -47,6 +50,8 @@ model Merchant {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
   products            Product[]
+
+  @@map("shopify_app_merchants")
 }
 
 // One row per Shopify product per merchant store
@@ -62,9 +67,11 @@ model Product {
   // status values: pending | processing | indexed | failed | outdated | excluded
   errorMessage String?
   lastSyncedAt DateTime?
-  merchant     Merchant  @relation(fields: [shop], references: [shop])
+  merchant     Merchant  @relation(fields: [shop], references: [shop], onDelete: Cascade)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   @@unique([shop, shopifyId])
+  @@index([shop, status])
+  @@map("shopify_app_products")
 }

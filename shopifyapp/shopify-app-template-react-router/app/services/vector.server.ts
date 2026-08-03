@@ -31,7 +31,7 @@ if (!VOYAGE_API_KEY) {
 
 let _sql: ReturnType<typeof postgres> | null = null;
 
-function getSql() {
+export function getSharedSql() {
   if (!DATABASE_URL) throw new Error("DATABASE_URL is not set");
   if (!_sql) {
     _sql = postgres(DATABASE_URL, { ssl: "require", max: 5 });
@@ -39,33 +39,37 @@ function getSql() {
   return _sql;
 }
 
+const getSql = getSharedSql;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface ProductVariant {
   id: string;
+  shopVariantId: string;
   title: string;
-  price: string;
-  compareAtPrice: string | null;  // original price before discount
+  price: number;
+  compareAtPrice: number | null;
+  available: boolean;
+  availableForSale: boolean;
+  stockQuantity: number | null;
+  color?: string;
+  size?: string;
   sku: string | null;
   barcode: string | null;
   weight: number | null;
-  weightUnit: string | null;      // KILOGRAMS, GRAMS, POUNDS, OUNCES
-  availableForSale: boolean;
+  weightUnit: string | null;
+  image: string | null;
+  // Retained for richer Shopify consumers while stockQuantity remains the
+  // canonical OpenCommerceLens field.
   inventoryQuantity: number | null;
   requiresShipping: boolean;
   taxable: boolean;
-  selectedOptions: { name: string; value: string }[]; // e.g. [{name:"Color",value:"Black"},{name:"Size",value:"M"}]
+  selectedOptions: { name: string; value: string }[];
 }
 
 export interface ProductOption {
   name: string;    // e.g. "Color", "Size"
   values: string[]; // e.g. ["Black", "White", "Red"]
-}
-
-export interface ProductCollection {
-  id: string;
-  title: string;
-  handle: string;
 }
 
 export interface ProductSeo {
@@ -79,6 +83,7 @@ export interface ProductToIndex {
   title: string;
   handle: string;
   description: string | null;
+  category: string | null;
   vendor: string | null;
   productType: string | null;
   status: string | null;        // ACTIVE, DRAFT, ARCHIVED
@@ -86,7 +91,7 @@ export interface ProductToIndex {
   images: string[];             // CDN URLs — first image used for embedding
   variants: ProductVariant[];
   options: ProductOption[];
-  collections: ProductCollection[];
+  collections: string[];
   seo: ProductSeo | null;
   totalInventory: number | null;
 }
@@ -102,11 +107,49 @@ export interface IndexResult {
 
 /**
  * Stable ID written to the shared DB.
- * Format: shopify::{shop}::{numericId}
+ * Format: {shopId}:{numericId}, matching the backend ingest contract.
  */
 export function productDbId(shop: string, shopifyGid: string): string {
   const numericId = shopifyGid.split("/").pop() ?? shopifyGid;
-  return `shopify::${shop}::${numericId}`;
+  return `${canonicalShopId(shop)}:${numericId}`;
+}
+
+export function canonicalShopId(shop: string): string {
+  return shop
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\.myshopify\.com\/?$/, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function variantDbId(productId: string, shopifyVariantId: string): string {
+  const numericId = shopifyVariantId.split("/").pop() ?? shopifyVariantId;
+  return `${productId}:${numericId}`;
+}
+
+const CATEGORY_KEYWORDS: Record<string, string[]> = {
+  yoga: ["yoga", "legging", "sports bra", "workout"],
+  outerwear: ["jacket", "coat", "puffer", "parka", "vest"],
+  denim: ["denim", "jean"],
+  dress: ["dress", "gown", "romper", "jumpsuit"],
+  top: ["tee", "t-shirt", "shirt", "top", "sweater", "hoodie", "sweatshirt", "blouse"],
+  bottom: ["pant", "short", "skirt", "trouser", "legging", "skort"],
+  tailoring: ["suit", "blazer", "tailor"],
+  swim: ["swim", "bikini", "swimsuit", "boardshort"],
+  accessory: ["cap", "hat", "bag", "sock", "belt"],
+};
+
+export function inferProductCategory(
+  productType: string | null | undefined,
+  tags: string[]
+): string | null {
+  const haystack = [productType ?? "", ...tags].join(" ").toLowerCase();
+  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (keywords.some((keyword) => haystack.includes(keyword))) return category;
+  }
+  return productType?.trim().toLowerCase() || null;
 }
 
 // ─── Text content builder ─────────────────────────────────────────────────────
@@ -120,7 +163,9 @@ function buildProductText(product: ProductToIndex): string {
   const parts: string[] = [`Title: ${product.title}`];
 
   if (product.vendor) parts.push(`Brand: ${product.vendor}`);
-  if (product.productType) parts.push(`Category: ${product.productType}`);
+  if (product.category || product.productType) {
+    parts.push(`Category: ${product.category ?? product.productType}`);
+  }
 
   // Structured options (Color, Size, Material, etc.)
   for (const opt of product.options) {
@@ -131,7 +176,7 @@ function buildProductText(product: ProductToIndex): string {
 
   // Collections the product belongs to
   if (product.collections.length > 0) {
-    parts.push(`Collections: ${product.collections.map((c) => c.title).join(", ")}`);
+    parts.push(`Collections: ${product.collections.join(", ")}`);
   }
 
   if (product.description) {
@@ -149,10 +194,10 @@ function buildProductText(product: ProductToIndex): string {
 
   // Price & discount signal
   const prices = product.variants
-    .map((v) => parseFloat(v.price))
+    .map((v) => v.price)
     .filter((p) => !isNaN(p));
   const comparePrices = product.variants
-    .map((v) => (v.compareAtPrice ? parseFloat(v.compareAtPrice) : NaN))
+    .map((v) => v.compareAtPrice ?? NaN)
     .filter((p) => !isNaN(p));
 
   if (prices.length > 0) {
@@ -250,20 +295,46 @@ export async function ensureSchema(): Promise<void> {
 
 async function validateSchema(): Promise<void> {
   const sql = getSql();
-  const required = [
-    "id", "shop_id", "shop", "handle", "title", "product_type", "images",
-    "variants", "options", "collections", "taxable", "fetched_at",
-  ];
-  const rows = await sql<{ column_name: string }[]>`
-    SELECT column_name
+  const requiredColumns: Record<string, string[]> = {
+    shops: [
+      "shop_id", "name", "domain", "base_url", "active", "created_at", "updated_at",
+    ],
+    products: [
+      "id", "shop_id", "shop", "title", "description", "category",
+      "tags", "images", "processed_images", "min_price", "max_price", "url",
+      "vendor", "status", "on_sale", "compare_at_price_min",
+      "compare_at_price_max", "total_inventory", "requires_shipping",
+      "is_taxable", "variants", "options", "collections", "seo", "fetched_at",
+      "created_at", "updated_at",
+    ],
+    product_variants: [
+      "id", "product_id", "shop_variant_id", "title", "color", "size",
+      "price", "stock_quantity", "available", "image", "created_at", "updated_at",
+    ],
+    product_embeddings: ["product_id", "embedding", "embedded_at"],
+  };
+  const rows = await sql<{ table_name: string; column_name: string }[]>`
+    SELECT table_name, column_name
     FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'products'
+    WHERE table_schema = 'public'
+      AND table_name IN ('shops', 'products', 'product_variants', 'product_embeddings')
   `;
-  const present = new Set(rows.map((row) => row.column_name));
-  const missing = required.filter((column) => !present.has(column));
+  const present = new Set(
+    rows.map((row) => `${row.table_name}.${row.column_name}`)
+  );
+  const missing = Object.entries(requiredColumns).flatMap(([table, columns]) =>
+    columns
+      .filter((column) => !present.has(`${table}.${column}`))
+      .map((column) => `${table}.${column}`)
+  );
   if (missing.length > 0) {
     throw new Error(`Shared catalogue schema is missing: ${missing.join(", ")}`);
   }
+
+  console.info("[OCL_INDEX] shared_schema_validated", {
+    tables: Object.keys(requiredColumns),
+    checkedColumns: Object.values(requiredColumns).flat().length,
+  });
 }
 
 // ─── Database writes ──────────────────────────────────────────────────────────
@@ -271,14 +342,15 @@ async function validateSchema(): Promise<void> {
 async function upsertProduct(product: ProductToIndex): Promise<string> {
   const sql = getSql();
   const id = productDbId(product.shop, product.shopifyId);
+  const shopId = canonicalShopId(product.shop);
   const url = `https://${product.shop}/products/${product.handle}`;
   const now = new Date();
-  const shopName = product.shop.replace(/\.myshopify\.com$/i, "").replace(/[-_]+/g, " ");
+  const shopName = shopId.replace(/[-_]+/g, " ");
   const catalogStatus = (product.status || "active").toLowerCase();
 
   await sql`
     INSERT INTO shops (shop_id, name, domain, base_url, active, created_at, updated_at)
-    VALUES (${product.shop}, ${shopName}, ${product.shop}, ${`https://${product.shop}`}, true, ${now}, ${now})
+    VALUES (${shopId}, ${shopName}, ${product.shop}, ${`https://${product.shop}`}, true, ${now}, ${now})
     ON CONFLICT (shop_id) DO UPDATE SET
       name = EXCLUDED.name,
       domain = EXCLUDED.domain,
@@ -289,21 +361,21 @@ async function upsertProduct(product: ProductToIndex): Promise<string> {
 
   // ── Price calculations ──────────────────────────────────────────────────────
   const prices = product.variants
-    .map((v) => parseFloat(v.price))
+    .map((v) => v.price)
     .filter((p) => !isNaN(p));
   const minPrice = prices.length > 0 ? Math.min(...prices) : null;
   const maxPrice = prices.length > 0 ? Math.max(...prices) : null;
 
   const comparePrices = product.variants
-    .map((v) => (v.compareAtPrice ? parseFloat(v.compareAtPrice) : NaN))
+    .map((v) => v.compareAtPrice ?? NaN)
     .filter((p) => !isNaN(p));
   const minCompare = comparePrices.length > 0 ? Math.min(...comparePrices) : null;
   const maxCompare = comparePrices.length > 0 ? Math.max(...comparePrices) : null;
 
   // Product is on sale if any variant has a compareAtPrice higher than its sale price
   const onSale = product.variants.some((v) => {
-    if (!v.compareAtPrice) return false;
-    return parseFloat(v.compareAtPrice) > parseFloat(v.price);
+    if (v.compareAtPrice === null) return false;
+    return v.compareAtPrice > v.price;
   });
 
   // ── Shipping / tax flags ────────────────────────────────────────────────────
@@ -315,16 +387,16 @@ async function upsertProduct(product: ProductToIndex): Promise<string> {
   // causes the postgres library to double-encode them as JSONB string scalars.
   await sql`
     INSERT INTO products (
-      id, shop_id, shop, handle, title, description, category, product_type,
+      id, shop_id, shop, title, description, category,
       tags, images,
       min_price, max_price, url,
       vendor, status,
       on_sale, compare_at_price_min, compare_at_price_max,
-      total_inventory, requires_shipping, taxable,
+      total_inventory, requires_shipping, is_taxable,
       variants, options, collections, seo,
       fetched_at
     ) VALUES (
-      ${id}, ${product.shop}, ${product.shop}, ${product.handle}, ${product.title}, ${product.description ?? null}, ${product.productType ?? null}, ${product.productType ?? null},
+      ${id}, ${shopId}, ${shopId}, ${product.title}, ${product.description ?? null}, ${product.category},
       ${sql.json(product.tags)}, ${sql.json(product.images)},
       ${minPrice}, ${maxPrice}, ${url},
       ${product.vendor ?? null}, ${catalogStatus},
@@ -335,10 +407,8 @@ async function upsertProduct(product: ProductToIndex): Promise<string> {
     )
     ON CONFLICT (id) DO UPDATE SET
       title                 = EXCLUDED.title,
-      handle                = EXCLUDED.handle,
       description           = EXCLUDED.description,
       category              = EXCLUDED.category,
-      product_type          = EXCLUDED.product_type,
       tags                  = EXCLUDED.tags,
       images                = EXCLUDED.images,
       min_price             = EXCLUDED.min_price,
@@ -353,7 +423,7 @@ async function upsertProduct(product: ProductToIndex): Promise<string> {
       compare_at_price_max  = EXCLUDED.compare_at_price_max,
       total_inventory       = EXCLUDED.total_inventory,
       requires_shipping     = EXCLUDED.requires_shipping,
-      taxable               = EXCLUDED.taxable,
+      is_taxable            = EXCLUDED.is_taxable,
       variants              = EXCLUDED.variants,
       options               = EXCLUDED.options,
       collections           = EXCLUDED.collections,
@@ -362,7 +432,45 @@ async function upsertProduct(product: ProductToIndex): Promise<string> {
       updated_at            = EXCLUDED.fetched_at
   `;
 
+  await replaceProductVariants(id, product.variants);
   return id;
+}
+
+async function replaceProductVariants(
+  productId: string,
+  variants: ProductVariant[]
+): Promise<void> {
+  const sql = getSql();
+
+  // The JSONB product payload and relational variant rows must describe the
+  // same Shopify snapshot. Removing stale rows first also handles deleted
+  // Shopify variants.
+  await sql`DELETE FROM product_variants WHERE product_id = ${productId}`;
+
+  for (const variant of variants) {
+    await sql`
+      INSERT INTO product_variants (
+        id, product_id, shop_variant_id, title, color, size,
+        price, stock_quantity, available, image, created_at, updated_at
+      ) VALUES (
+        ${variant.id}, ${productId}, ${variant.shopVariantId},
+        ${variant.title}, ${variant.color ?? null}, ${variant.size ?? null},
+        ${variant.price}, ${variant.stockQuantity}, ${variant.available},
+        ${variant.image}, ${new Date()}, ${new Date()}
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        product_id = EXCLUDED.product_id,
+        shop_variant_id = EXCLUDED.shop_variant_id,
+        title = EXCLUDED.title,
+        color = EXCLUDED.color,
+        size = EXCLUDED.size,
+        price = EXCLUDED.price,
+        stock_quantity = EXCLUDED.stock_quantity,
+        available = EXCLUDED.available,
+        image = EXCLUDED.image,
+        updated_at = EXCLUDED.updated_at
+    `;
+  }
 }
 
 async function upsertEmbedding(dbId: string, embedding: number[]): Promise<void> {
@@ -390,11 +498,23 @@ async function upsertEmbedding(dbId: string, embedding: number[]): Promise<void>
  */
 export async function indexProduct(product: ProductToIndex): Promise<IndexResult> {
   const primaryImage = product.images[0];
+  const dbId = productDbId(product.shop, product.shopifyId);
+  const startedAt = Date.now();
 
   try {
+    console.info("[OCL_INDEX] product_pipeline_started", {
+      productId: dbId,
+      title: product.title,
+      imageCount: product.images.length,
+      variantCount: product.variants.length,
+    });
     await ensureSchema();
     if (product.status && product.status.toUpperCase() !== "ACTIVE") {
       await removeProductFromIndex(product.shop, product.shopifyId);
+      console.info("[OCL_INDEX] product_removed_from_index", {
+        productId: dbId,
+        status: product.status,
+      });
       return {
         success: true,
         excluded: true,
@@ -402,12 +522,37 @@ export async function indexProduct(product: ProductToIndex): Promise<IndexResult
       };
     }
     const text = buildProductText(product);
+    const embeddingStartedAt = Date.now();
+    console.info("[OCL_INDEX] embedding_request_started", {
+      productId: dbId,
+      hasImage: Boolean(primaryImage),
+      textLength: text.length,
+    });
     const embedding = await getMultimodalEmbedding(text, primaryImage);
-    const dbId = await upsertProduct(product);
+    console.info("[OCL_INDEX] embedding_request_completed", {
+      productId: dbId,
+      dimensions: embedding.length,
+      durationMs: Date.now() - embeddingStartedAt,
+    });
+    await upsertProduct(product);
+    console.info("[OCL_INDEX] catalogue_upsert_completed", {
+      productId: dbId,
+      variantCount: product.variants.length,
+    });
     await upsertEmbedding(dbId, embedding);
+    console.info("[OCL_INDEX] embedding_upsert_completed", {
+      productId: dbId,
+      durationMs: Date.now() - startedAt,
+    });
     return { success: true, productDbId: dbId };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error("[OCL_INDEX] product_pipeline_failed", {
+      productId: dbId,
+      title: product.title,
+      durationMs: Date.now() - startedAt,
+      errorMessage: message,
+    });
     return { success: false, message };
   }
 }

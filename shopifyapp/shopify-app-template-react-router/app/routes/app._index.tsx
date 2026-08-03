@@ -4,17 +4,27 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { triggerInitialSync, triggerFullResync } from "../services/sync.server";
+import {
+  syncErrorMessage,
+  triggerInitialSync,
+  triggerFullResync,
+} from "../services/sync.server";
+import {
+  getProductWebhookQueueStats,
+  retryFailedProductWebhookJobs,
+  startProductWebhookWorker,
+} from "../services/webhook-queue.server";
 import { getCatalogueEntitlement } from "../services/entitlements.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
+  startProductWebhookWorker();
   const shop = session.shop;
 
   // Ensure merchant row exists
@@ -31,12 +41,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     });
     // Fire-and-forget — does not block the page response
     triggerInitialSync(admin, shop).catch((err) =>
-      console.error("[OpenCommerceLens] Background initial sync error:", err)
+      console.error("[OCL_SYNC] background_initial_sync_task_rejected", {
+        shop,
+        errorMessage: syncErrorMessage(err),
+      })
     );
   }
 
   // Stats
-  const [total, indexed, processing, outdated, failed, excluded, entitlement] = await Promise.all([
+  const [
+    total,
+    indexed,
+    processing,
+    outdated,
+    failed,
+    excluded,
+    entitlement,
+    queue,
+  ] = await Promise.all([
     prisma.product.count({ where: { shop } }),
     prisma.product.count({ where: { shop, status: "indexed" } }),
     prisma.product.count({ where: { shop, status: "processing" } }),
@@ -44,6 +66,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     prisma.product.count({ where: { shop, status: "failed" } }),
     prisma.product.count({ where: { shop, status: "excluded" } }),
     getCatalogueEntitlement(shop),
+    getProductWebhookQueueStats(shop),
   ]);
 
   return {
@@ -56,6 +79,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       lastSyncAt: merchant.lastSyncAt?.toISOString() ?? null,
     },
     stats: { total, indexed, processing, outdated, failed, excluded },
+    queue: {
+      ...queue,
+      lastCompletedAt: queue.lastCompletedAt?.toISOString() ?? null,
+    },
     entitlement: {
       ...entitlement,
       productLimit: Number.isFinite(entitlement.productLimit)
@@ -73,11 +100,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const intent = formData.get("intent");
 
   if (intent === "resync-all") {
+    console.info("[OCL_SYNC] dashboard_resync_request_accepted", { shop });
     // Fire-and-forget full resync
     triggerFullResync(admin, shop).catch((err) =>
-      console.error("[OpenCommerceLens] Full resync error:", err)
+      console.error("[OCL_SYNC] dashboard_resync_task_rejected", {
+        shop,
+        errorMessage: syncErrorMessage(err),
+      })
     );
     return { ok: true, message: "Full resync started" };
+  }
+
+  if (intent === "retry-webhooks") {
+    const count = await retryFailedProductWebhookJobs(shop);
+    return {
+      ok: true,
+      message:
+        count > 0
+          ? `${count} failed webhook job${count === 1 ? "" : "s"} queued for retry`
+          : "No failed webhook jobs to retry",
+    };
   }
 
   return { ok: false, message: "Unknown intent" };
@@ -105,8 +147,11 @@ function planLabel(plan: string) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { merchant, stats, shop, entitlement } = useLoaderData<typeof loader>();
+  const { merchant, stats, shop, entitlement, queue } =
+    useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
+  const retryFetcher = useFetcher<typeof action>();
+  const revalidator = useRevalidator();
   const shopify = useAppBridge();
 
   const isResyncing =
@@ -118,10 +163,34 @@ export default function Dashboard() {
     }
   }, [fetcher.data, shopify]);
 
+  useEffect(() => {
+    if (retryFetcher.data?.message) {
+      shopify.toast.show(retryFetcher.data.message);
+    }
+  }, [retryFetcher.data, shopify]);
+
   const isSyncing =
     merchant.syncStatus === "in_progress" ||
     merchant.syncStatus === "never" ||
     !merchant.initialSyncComplete;
+  const hasActiveWork =
+    isSyncing ||
+    stats.processing > 0 ||
+    queue.pending > 0 ||
+    queue.processing > 0;
+  const indexedUsage = Math.max(0, stats.total - stats.excluded);
+  const usageLabel =
+    entitlement.productLimit === null
+      ? `${indexedUsage} products indexed - unlimited plan`
+      : `${indexedUsage} of ${entitlement.productLimit} catalogue slots used`;
+
+  useEffect(() => {
+    if (!hasActiveWork) return;
+    const timer = window.setInterval(() => {
+      if (revalidator.state === "idle") revalidator.revalidate();
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveWork, revalidator]);
 
   return (
     <s-page heading="OpenCommerceLens Catalogue Dashboard">
@@ -153,6 +222,20 @@ export default function Dashboard() {
           </s-paragraph>
         </s-section>
       )}
+
+      <s-section heading="Catalogue usage">
+        <s-paragraph>
+          <s-text>{usageLabel}</s-text>
+        </s-paragraph>
+        {stats.excluded > 0 && (
+          <s-paragraph>
+            <s-text>
+              {stats.excluded} product{stats.excluded === 1 ? "" : "s"} remain
+              excluded by the current catalogue limit.
+            </s-text>
+          </s-paragraph>
+        )}
+      </s-section>
 
       {/* Stats row */}
       <s-section heading="Catalogue Overview">
@@ -277,6 +360,47 @@ export default function Dashboard() {
           <s-link href="/app/billing">Manage billing →</s-link>
         </s-paragraph>
       </s-section>
+
+      <s-section slot="aside" heading="Webhook queue">
+        <s-paragraph>
+          <s-text>Waiting: {queue.pending}</s-text>
+        </s-paragraph>
+        <s-paragraph>
+          <s-text>Processing: {queue.processing}</s-text>
+        </s-paragraph>
+        <s-paragraph>
+          <s-text>Failed: </s-text>
+          <s-badge tone={queue.failed > 0 ? "critical" : "success"}>
+            {queue.failed}
+          </s-badge>
+        </s-paragraph>
+        <s-paragraph>
+          <s-text>Last product update: </s-text>
+          <s-text>{formatDate(queue.lastCompletedAt)}</s-text>
+        </s-paragraph>
+      </s-section>
+
+      {queue.failed > 0 && (
+        <s-section heading="Webhook updates need attention">
+          <s-paragraph>
+            {queue.failed} product update{queue.failed === 1 ? "" : "s"} could
+            not be indexed after automatic retries.
+          </s-paragraph>
+          <s-button
+            onClick={() =>
+              retryFetcher.submit(
+                { intent: "retry-webhooks" },
+                { method: "POST" }
+              )
+            }
+            {...(retryFetcher.state !== "idle"
+              ? { loading: true }
+              : {})}
+          >
+            Retry failed updates
+          </s-button>
+        </s-section>
+      )}
 
       {/* Failed products callout */}
       {stats.failed > 0 && (

@@ -50,7 +50,7 @@ export default defineConfig({
   },
   plugins: [
     reactRouter(),
-    tsconfigPaths(),
+    tsconfigPaths({ ignoreConfigErrors: true }),
   ],
   build: {
     assetsInlineLimit: 0,

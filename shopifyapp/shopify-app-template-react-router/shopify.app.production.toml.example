@@ -1,17 +1,15 @@
-# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
-
+# Copy to shopify.app.production.toml and replace YOUR_PRODUCTION_DOMAIN.
 client_id = "29f6f932a0aed3b070510b5205e576b4"
-application_url = "https://example.com"
+application_url = "https://YOUR_PRODUCTION_DOMAIN"
 embedded = true
 name = "OpenCommerceLens"
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
 
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "read_products,read_inventory"
-optional_scopes = [ ]
+optional_scopes = []
 use_legacy_install_flow = false
 
 [webhooks]
@@ -42,4 +40,8 @@ api_version = "2025-10"
   topics = [ "products/delete" ]
 
 [auth]
-redirect_urls = [ ]
+redirect_urls = [
+  "https://YOUR_PRODUCTION_DOMAIN/auth/callback",
+  "https://YOUR_PRODUCTION_DOMAIN/auth/shopify/callback",
+  "https://YOUR_PRODUCTION_DOMAIN/api/auth/callback"
+]

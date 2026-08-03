@@ -1,21 +1,27 @@
 -- CreateTable
-CREATE TABLE "Merchant" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+CREATE TABLE "shopify_app_merchants" (
+    "id" TEXT NOT NULL,
     "shop" TEXT NOT NULL,
     "plan" TEXT NOT NULL DEFAULT 'none',
     "subscriptionId" TEXT,
     "subscriptionStatus" TEXT NOT NULL DEFAULT 'inactive',
     "syncStatus" TEXT NOT NULL DEFAULT 'never',
     "initialSyncComplete" BOOLEAN NOT NULL DEFAULT false,
-    "lastSyncAt" DATETIME,
-    "installedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "lastSyncAt" TIMESTAMP(3),
+    "installedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "shopify_app_merchants_pkey" PRIMARY KEY ("id")
 );
 
+-- The referenced merchant key must be unique before PostgreSQL creates the FK.
+CREATE UNIQUE INDEX "shopify_app_merchants_shop_key"
+ON "shopify_app_merchants"("shop");
+
 -- CreateTable
-CREATE TABLE "Product" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+CREATE TABLE "shopify_app_products" (
+    "id" TEXT NOT NULL,
     "shop" TEXT NOT NULL,
     "shopifyId" TEXT NOT NULL,
     "title" TEXT NOT NULL,
@@ -24,14 +30,18 @@ CREATE TABLE "Product" (
     "productType" TEXT,
     "status" TEXT NOT NULL DEFAULT 'pending',
     "errorMessage" TEXT,
-    "lastSyncedAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
-    CONSTRAINT "Product_shop_fkey" FOREIGN KEY ("shop") REFERENCES "Merchant" ("shop") ON DELETE RESTRICT ON UPDATE CASCADE
+    "lastSyncedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "shopify_app_products_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "shopify_app_products_shop_fkey" FOREIGN KEY ("shop")
+      REFERENCES "shopify_app_merchants"("shop") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Merchant_shop_key" ON "Merchant"("shop");
+CREATE UNIQUE INDEX "shopify_app_products_shop_shopifyId_key"
+ON "shopify_app_products"("shop", "shopifyId");
 
--- CreateIndex
-CREATE UNIQUE INDEX "Product_shop_shopifyId_key" ON "Product"("shop", "shopifyId");
+CREATE INDEX "shopify_app_products_shop_status_idx"
+ON "shopify_app_products"("shop", "status");

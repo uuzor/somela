@@ -7,6 +7,7 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
+import { startProductWebhookWorker } from "./services/webhook-queue.server";
 
 export const PLANS = {
   STARTER: "Starter Plan",
@@ -74,6 +75,8 @@ const shopify = shopifyApp({
     ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
     : {}),
 });
+
+startProductWebhookWorker();
 
 export default shopify;
 export const apiVersion = ApiVersion.October25;
