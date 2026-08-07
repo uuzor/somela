@@ -428,7 +428,7 @@ export default function Dashboard() {
           </s-list-item>
           <s-list-item>
             <s-link
-              href="https://goatsight.com/docs"
+              href="/support"
               target="_blank"
             >
               Documentation
@@ -436,7 +436,7 @@ export default function Dashboard() {
           </s-list-item>
           <s-list-item>
             <s-link
-              href="https://goatsight.com/support"
+              href="/support"
               target="_blank"
             >
               Support

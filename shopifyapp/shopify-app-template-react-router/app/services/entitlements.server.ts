@@ -13,11 +13,13 @@ export interface CatalogueEntitlement {
   productLimit: number;
 }
 
+const paidBillingEnabled = process.env.SHOPIFY_BILLING_ENABLED === "true";
+
 export async function getCatalogueEntitlement(
   shop: string
 ): Promise<CatalogueEntitlement> {
   const merchant = await prisma.merchant.findUnique({ where: { shop } });
-  const hasPaidPlan = merchant?.subscriptionStatus === "active";
+  const hasPaidPlan = paidBillingEnabled && merchant?.subscriptionStatus === "active";
   const plan = hasPaidPlan ? merchant?.plan ?? "none" : "none";
 
   return {

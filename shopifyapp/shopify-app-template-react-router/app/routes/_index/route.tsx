@@ -21,16 +21,17 @@ export default function App() {
   return (
     <div className={styles.index}>
       <div className={styles.content}>
-        <h1 className={styles.heading}>A short heading about [your app]</h1>
+        <h1 className={styles.heading}>Make your catalogue discoverable to AI shoppers</h1>
         <p className={styles.text}>
-          A tagline about [your app] that describes your value proposition.
+          OpenCommerceLens syncs your Shopify products into an AI-ready catalogue
+          so customers can discover the right products through natural language.
         </p>
         {showForm && (
           <Form className={styles.form} method="post" action="/auth/login">
             <label className={styles.label}>
-              <span>Shop domain</span>
+              <span>Shopify store domain</span>
               <input className={styles.input} type="text" name="shop" />
-              <span>e.g: my-shop-domain.myshopify.com</span>
+              <span>Example: my-shop-domain.myshopify.com</span>
             </label>
             <button className={styles.button} type="submit">
               Log in
@@ -39,18 +40,24 @@ export default function App() {
         )}
         <ul className={styles.list}>
           <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
+              <strong>AI-ready product catalogue</strong>. Sync product details,
+              variants, images, inventory, and embeddings for agent discovery.
           </li>
           <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
+              <strong>Automatic synchronisation</strong>. Keep products indexed
+              when they are created, updated, or deleted in Shopify.
           </li>
           <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
+              <strong>Catalogue controls</strong>. Monitor indexing status and
+              manage your free catalogue preview from the Shopify admin.
           </li>
         </ul>
+        <nav className={styles.policies} aria-label="Legal and support links">
+          <a href="/privacy">Privacy Policy</a>
+          <a href="/terms">Terms of Service</a>
+          <a href="/support">Support</a>
+          <a href="/data-deletion">Data Deletion</a>
+        </nav>
       </div>
     </div>
   );
