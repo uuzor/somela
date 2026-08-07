@@ -1,6 +1,6 @@
-# Copy to shopify.app.production.toml and replace YOUR_PRODUCTION_DOMAIN.
+# Production configuration for somela.vercel.app.
 client_id = "29f6f932a0aed3b070510b5205e576b4"
-application_url = "https://YOUR_PRODUCTION_DOMAIN"
+application_url = "https://somela.vercel.app"
 embedded = true
 name = "OpenCommerceLens"
 
@@ -41,7 +41,7 @@ api_version = "2025-10"
 
 [auth]
 redirect_urls = [
-  "https://YOUR_PRODUCTION_DOMAIN/auth/callback",
-  "https://YOUR_PRODUCTION_DOMAIN/auth/shopify/callback",
-  "https://YOUR_PRODUCTION_DOMAIN/api/auth/callback"
+  "https://somela.vercel.app/auth/callback",
+  "https://somela.vercel.app/auth/shopify/callback",
+  "https://somela.vercel.app/api/auth/callback"
 ]

@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "29f6f932a0aed3b070510b5205e576b4"
-application_url = "https://example.com"
+application_url = "https://somela.vercel.app"
 embedded = true
 name = "OpenCommerceLens"
 
@@ -42,4 +42,8 @@ api_version = "2025-10"
   topics = [ "products/delete" ]
 
 [auth]
-redirect_urls = [ ]
+redirect_urls = [
+  "https://somela.vercel.app/auth/callback",
+  "https://somela.vercel.app/auth/shopify/callback",
+  "https://somela.vercel.app/api/auth/callback"
+]
